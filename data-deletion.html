@@ -1,0 +1,98 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>thread-snack — 사용자 데이터 삭제 안내</title>
+<style>
+  :root { --bg:#ffffff; --ink:#16181d; --ink2:#4b5262; --rule:#e2e5ec; --accent:#c2410c; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#0f1116; --ink:#e9ecf2; --ink2:#aab2c2; --rule:#272c37; --accent:#f4823f; }
+  }
+  body { margin:0; background:var(--bg); color:var(--ink); line-height:1.7;
+    font-family: system-ui,-apple-system,"Segoe UI",Roboto,"Noto Sans KR",sans-serif; }
+  main { max-width:44rem; margin:0 auto; padding:3rem 1.4rem 5rem; }
+  h1 { font-size:1.8rem; margin:0 0 .4rem; }
+  h2 { font-size:1.15rem; margin:2.2rem 0 .6rem; padding-bottom:.4rem; border-bottom:1px solid var(--rule); }
+  p, li { color:var(--ink2); }
+  .meta { color:var(--ink2); font-size:.9rem; margin:0 0 2rem; }
+  ol li { margin-bottom:.5rem; }
+  code, pre { font-family: ui-monospace,SFMono-Regular,Menlo,monospace; }
+  code { font-size:.9em; background:rgba(128,128,128,.14); padding:.05em .35em; border-radius:3px; }
+  pre { background:rgba(128,128,128,.12); padding:.8rem 1rem; border-radius:4px; overflow-x:auto; font-size:.85rem; color:var(--ink); }
+  a { color:var(--accent); }
+  .box { border-left:3px solid var(--accent); padding:.9rem 1.1rem; background:rgba(128,128,128,.08);
+    border-radius:0 4px 4px 0; margin:1.2rem 0; }
+  footer { margin-top:3rem; padding-top:1rem; border-top:1px solid var(--rule); font-size:.85rem; color:var(--ink2); }
+</style>
+</head>
+<body>
+<main>
+  <h1>사용자 데이터 삭제 안내</h1>
+  <p class="meta">thread-snack · 최종 수정일 2026년 8월 12일</p>
+
+  <p>
+    thread-snack은 개인이 혼자 사용하는 비상업적 도구입니다. 회원가입이 없고, 운영자
+    본인 외에 이용자가 없으며, 모든 데이터는 운영자 컴퓨터의 로컬 데이터베이스 파일
+    하나에만 저장됩니다. 이 문서는 그 데이터를 삭제하는 방법을 설명합니다.
+  </p>
+
+  <h2>보관되는 데이터</h2>
+  <ul>
+    <li>공개 Threads 게시물의 본문·작성자 사용자명·게시 시각·공개 링크·공개 반응 수</li>
+    <li>중복 전송을 막기 위한 게시물 식별자 기록</li>
+    <li>운영자 본인의 Threads 액세스 토큰</li>
+    <li>실행 이력(시각·성공 여부·건수)</li>
+  </ul>
+  <p>비공개 게시물, 메시지, 이메일, 전화번호, 결제 정보는 보관하지 않습니다.</p>
+
+  <h2>1. 게시물 작성자가 삭제를 요청하는 경우</h2>
+  <p>
+    자신이 작성한 공개 Threads 게시물이 thread-snack에 보관되는 것을 원하지 않는다면,
+    아래 중 한 가지 방법으로 요청해 주세요. 요청을 확인하는 즉시 해당 작성자의 데이터를
+    전부 삭제하고 이후 수집 대상에서 제외합니다.
+  </p>
+  <ol>
+    <li>
+      GitHub 이슈로 요청:
+      <a href="https://github.com/chxndev/thread-snack-policy/issues/new">
+        github.com/chxndev/thread-snack-policy/issues/new</a>
+    </li>
+    <li>제목에 <code>데이터 삭제 요청</code>이라고 적고, 본문에 해당 Threads 사용자명(@ 포함)을 적어 주세요.</li>
+  </ol>
+  <div class="box">
+    <strong>확인 절차</strong><br>
+    본인 확인을 위해, 요청하신 Threads 계정에서 확인 가능한 방법(예: 해당 계정으로 올린
+    게시물 링크)을 함께 알려 주시면 처리가 빠릅니다. 처리 완료 시 해당 이슈에 답변을 남깁니다.
+  </div>
+
+  <h2>2. Meta 계정 연결을 끊는 경우</h2>
+  <p>
+    Threads 설정에서 이 앱의 접근 권한을 철회하면 thread-snack은 더 이상 Threads API로
+    데이터를 가져올 수 없습니다.
+  </p>
+  <ol>
+    <li><a href="https://www.threads.net/settings/account">threads.net/settings/account</a> 접속</li>
+    <li>웹사이트 권한 항목에서 thread-snack 연결 해제</li>
+  </ol>
+  <p>연결을 끊어도 이미 보관된 데이터는 남으므로, 그 삭제까지 원한다면 위 1번 방법으로 요청해 주세요.</p>
+
+  <h2>3. 운영자가 전체 데이터를 삭제하는 방법</h2>
+  <p>운영자는 아래 명령으로 저장된 데이터 전부를 즉시 삭제할 수 있습니다.</p>
+  <pre>systemctl --user stop thread-snack.service
+rm ~/work/chxnProj/thread-snack/threadsnack/data/threadsnack.db
+systemctl --user start thread-snack.service</pre>
+  <p>
+    이 파일이 유일한 저장소이므로, 삭제하면 수집한 게시물·전송 기록·토큰이 모두 사라집니다.
+    앱은 다음 실행에서 빈 데이터베이스를 새로 만듭니다.
+  </p>
+
+  <h2>처리 기한</h2>
+  <p>삭제 요청은 확인 후 <strong>7일 이내</strong>에 처리합니다.</p>
+
+  <footer>
+    <a href="./privacy.html">개인정보처리방침</a> · thread-snack — 개인용 Threads 수집·요약 도구
+  </footer>
+</main>
+</body>
+</html>
