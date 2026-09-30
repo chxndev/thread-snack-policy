@@ -260,3 +260,16 @@ test('complete 중단 시 오류 메시지를 남기지 않는다', async () => 
   assert.equal(project.answers.q1.status, 'idle');
   assert.equal(project.answers.q1.error, '');
 });
+
+test('같은 턴에 ask_user와 finish_interview가 오면 질문에도 tool_result를 채운다', async () => {
+  const project = sampleProject();
+  const client = fakeClient(() => makeMessage([
+    toolUse('ask_user', { question: '마지막 질문', why: '', example: '' }, 'ask_last'),
+    toolUse('finish_interview', { summary: 's', writer_notes: '' }, 'fin'),
+  ], { stopReason: 'tool_use' }));
+  const agent = createAgent({ client });
+  const r = await agent.interviewStart(project, {});
+  assert.equal(r.type, 'done');
+  const last = project.interview.messages.at(-1);
+  assert.deepEqual(last.content.map((b) => b.tool_use_id).sort(), ['ask_last', 'fin']);
+});

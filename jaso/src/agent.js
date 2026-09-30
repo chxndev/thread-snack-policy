@@ -240,6 +240,8 @@ export function createAgent({ client, settings = {}, onUsage, isApiError = () =>
       }
 
       if (finished) {
+        // 같은 턴에 질문도 있었다면 tool_result를 채워 히스토리를 유효하게 유지한다
+        if (ask) results.push({ type: 'tool_result', tool_use_id: ask.toolUseId, content: '(인터뷰가 종료되어 이 질문은 생략합니다.)' });
         iv.messages.push({ role: 'user', content: results });
         iv.summary = finished.summary ?? '';
         iv.writerNotes = finished.writer_notes ?? '';

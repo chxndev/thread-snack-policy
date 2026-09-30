@@ -578,7 +578,14 @@ function writeHandlers(q, signal) {
       const c = $(`#count-${q.id}`);
       if (c) c.innerHTML = countHtml(q, snapshot);
     },
-    onVersion: () => save(),
+    onVersion: (version) => {
+      save();
+      // 스트리밍 원문 대신 정리된 버전 텍스트를 보여 준다
+      const ta = $(`#answer-${q.id}`);
+      if (ta && version?.text != null) ta.value = version.text;
+      const c = $(`#count-${q.id}`);
+      if (c && version?.text != null) c.innerHTML = countHtml(q, version.text);
+    },
   };
 }
 
