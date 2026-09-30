@@ -1,6 +1,8 @@
 // 자소서 에이전트 UI 컨트롤러 (프레임워크 없이 상태 → HTML 렌더링)
-import { createClient, MODELS, EFFORTS, describeError, costFromMessage, isApiError, isToolJsonError } from './api.js';
+import { MODELS, EFFORTS, TIERS, describeError, costFromMessage } from './api.js';
 import { createAgent, DEFAULT_SETTINGS, emptyInterview, ensureAnswer, currentText, currentVersion, upsertExperience, addVersion } from './agent.js';
+import { createSdkClient } from './llm-sdk.js';
+import { createSampleProvider } from './llm-sample.js';
 import { storage } from './storage.js';
 import { COMMON_QUESTIONS, COMPANY_PRESETS } from './presets.js';
 import { QUESTION_TYPES, EDIT_PRESETS, SCORE_LABELS, INTERVIEW_SKIP_ANSWER, CRITIQUE_SCHEMA, computeTotal } from './prompts.js';
@@ -111,6 +113,12 @@ function normalizeProject(p) {
   return out;
 }
 
+// 실행 환경: claude.ai 아티팩트(구독 사용량으로 Claude 호출) 또는 일반 웹(API 키)
+const RUNTIME = {
+  artifact: typeof window !== 'undefined' && !!window.claude && typeof window.claude.use === 'function',
+  sample: null, downloads: null, checked: false, sdk: null,
+};
+
 const state = {
   project: normalizeProject(storage.loadProject()),
   settings: { ...DEFAULT_SETTINGS, ...storage.loadSettings() },
@@ -137,23 +145,39 @@ function toast(message, kind = '') {
   setTimeout(() => el.remove(), kind === 'bad' ? 6000 : 3200);
 }
 
-function getAgent() {
+function onUsage({ message, model }) {
+  const u = state.project.usage;
+  u.calls += 1;
+  if (message) {
+    const c = costFromMessage(message, state.settings.model);
+    u.input += c.tokens.input; u.output += c.tokens.output; u.cacheRead += c.tokens.cacheRead; u.cacheWrite += c.tokens.cacheWrite;
+    u.costUsd += c.usd;
+    if (c.fallbackRan) toast(`안전 분류기 거절로 폴백 모델(${message.model})이 응답했습니다.`);
+  } else if (model) {
+    u.lastTier = model;
+  }
+  renderSide();
+}
+
+async function getAgent() {
+  if (RUNTIME.artifact) {
+    if (!RUNTIME.sample) throw Object.assign(new Error(RUNTIME.checked ? '이 페이지에서는 Claude를 호출할 수 없습니다. claude.ai 안에서 열어 주세요.' : 'Claude 연결을 확인하는 중입니다. 잠시 후 다시 시도하세요.'), { code: 'norun' });
+    const cfg = { ...DEFAULT_SETTINGS, ...state.settings };
+    return createAgent({ provider: createSampleProvider({ sample: RUNTIME.sample, cfg, onUsage }), settings: state.settings, onUsage });
+  }
   if (!state.apiKey) throw Object.assign(new Error('API 키를 먼저 설정하세요.'), { code: 'nokey' });
-  const client = createClient({ apiKey: state.apiKey, baseURL: state.settings.baseURL });
-  return createAgent({
-    client,
-    settings: state.settings,
-    isApiError,
-    isToolJsonError,
-    onUsage: ({ message }) => {
-      const u = state.project.usage;
-      const c = costFromMessage(message, state.settings.model);
-      u.input += c.tokens.input; u.output += c.tokens.output; u.cacheRead += c.tokens.cacheRead; u.cacheWrite += c.tokens.cacheWrite; u.calls += 1;
-      u.costUsd += c.usd;
-      if (c.fallbackRan) toast(`안전 분류기 거절로 폴백 모델(${message.model})이 응답했습니다.`);
-      renderSide();
-    },
-  });
+  RUNTIME.sdk = await createSdkClient({ apiKey: state.apiKey, baseURL: state.settings.baseURL });
+  return createAgent({ client: RUNTIME.sdk.client, settings: state.settings, isApiError: RUNTIME.sdk.isApiError, isToolJsonError: RUNTIME.sdk.isToolJsonError, onUsage });
+}
+
+async function initRuntime() {
+  if (!RUNTIME.artifact) return;
+  try {
+    RUNTIME.sample = await window.claude.use('sample');
+    RUNTIME.downloads = await window.claude.use('downloads');
+  } catch (e) { console.error(e); }
+  RUNTIME.checked = true;
+  render();
 }
 
 /** 비동기 작업 래퍼: busy 표시, 중단 컨트롤러, 오류 토스트, 저장·렌더 */
@@ -166,8 +190,9 @@ async function runTask(label, fn, { rerender = true } = {}) {
     return await fn(state.ui.abort.signal);
   } catch (err) {
     if (err?.code === 'nokey') { toast(err.message, 'bad'); openSettings(); }
+    else if (err?.code === 'norun') toast(err.message, 'bad');
     else if (err?.code === 'aborted' || err?.name === 'APIUserAbortError') toast('중단했습니다.');
-    else { console.error(err); toast(describeError(err), 'bad'); }
+    else { console.error(err); toast(describeError(err, RUNTIME.sdk?.describeError), 'bad'); }
     return null;
   } finally {
     state.ui.busy = null;
@@ -187,7 +212,23 @@ function addQuestion(tpl = {}) {
   state.project.questions.push({ id: nextQuestionId(), text: tpl.text ?? '', limit: tpl.limit ?? 1000, mode: tpl.mode ?? 'with', type: tpl.type ?? 'competency' });
 }
 
-function hasApiKey() { return !!state.apiKey; }
+function hasApiKey() { return RUNTIME.artifact ? !!RUNTIME.sample : !!state.apiKey; }
+
+/** 아티팩트 뷰어는 confirm()을 지원하지 않으므로 페이지 안의 대화상자로 묻는다 */
+function askConfirm(message, { ok = '확인', danger = false } = {}) {
+  return new Promise((resolve) => {
+    const d = $('#confirm-dialog');
+    $('#confirm-message').textContent = message;
+    const okBtn = $('#confirm-ok');
+    okBtn.textContent = ok;
+    okBtn.classList.toggle('danger', danger);
+    const done = (v) => { d.removeEventListener('close', onClose); resolve(v); };
+    const onClose = () => done(d.returnValue === 'ok');
+    d.addEventListener('close', onClose);
+    d.returnValue = '';
+    d.showModal();
+  });
+}
 
 /** 문항 세트를 통째로 바꿀 때: 답변·문항 연관·인터뷰어 메모는 옛 문항 id에 묶여 있으므로 정리한다 */
 function replaceQuestions() {
@@ -255,6 +296,11 @@ function renderStage() {
 
 function keyNotice() {
   if (hasApiKey()) return '';
+  if (RUNTIME.artifact) {
+    return RUNTIME.checked
+      ? '<div class="notice bad">이 보기에서는 Claude를 호출할 수 없습니다. claude.ai에 로그인한 상태로 아티팩트를 열어 주세요.</div>'
+      : '<div class="notice info"><span class="spinner"></span> Claude 연결을 확인하고 있습니다…</div>';
+  }
   return `<div class="notice">아직 API 키가 없습니다. <button class="btn sm" data-action="open-settings">설정에서 키 입력</button> — Anthropic Console에서 발급한 키를 사용하며, 요청은 이 브라우저에서 직접 전송됩니다.</div>`;
 }
 
@@ -428,7 +474,7 @@ function renderWrite() {
   return `
   <div class="card">
     <div class="card-head">
-      <div><h2>3. 작성·첨삭</h2><div class="card-title-sub">문항마다 초안 → 인사담당자 첨삭 → 수정 → 글자수 조정을 자동으로 돌립니다. 모델 ${esc(MODELS.find((m) => m.id === state.settings.model)?.label ?? state.settings.model)}, 품질 ${esc(state.settings.effort)}.</div></div>
+      <div><h2>3. 작성·첨삭</h2><div class="card-title-sub">문항마다 초안 → 인사담당자 첨삭 → 수정 → 글자수 조정을 자동으로 돌립니다. ${RUNTIME.artifact ? `claude.ai 구독, 작성 등급 ${esc(state.settings.tier ?? 'complex')}` : `모델 ${esc(MODELS.find((m) => m.id === state.settings.model)?.label ?? state.settings.model)}, 품질 ${esc(state.settings.effort)}`}.</div></div>
       <div class="btn-row">
         ${busy ? `<button class="btn" data-action="stop">중단</button>` : `<button class="btn primary" data-action="write-all" ${!p.questions.length ? 'disabled' : ''}>${pendingCount ? `남은 ${pendingCount}문항 완성하기` : '전체 다시 생성'}</button>`}
       </div>
@@ -534,18 +580,21 @@ function renderSide() {
       </div>`).join('') : '<div class="empty">인터뷰를 진행하면 자동으로 쌓입니다. 직접 추가할 수도 있습니다.</div>'}
   </div>
   <div class="card">
-    <h3 style="font-size:.95rem;margin-bottom:.4rem">사용량 <span class="muted small">(추정)</span></h3>
+    <h3 style="font-size:.95rem;margin-bottom:.4rem">사용량 ${RUNTIME.artifact ? '<span class="muted small">(claude.ai 구독)</span>' : '<span class="muted small">(추정)</span>'}</h3>
     <div class="usage">
       <span>호출</span><b>${fmtNum(u.calls)}</b>
+      ${RUNTIME.artifact ? `<span>최근 등급</span><b>${esc((u.lastTier ?? '').replace('claude.ai/', '') || '-')}</b>` : `
       <span>입력 토큰</span><b>${fmtNum(u.input)}</b>
       <span>캐시 읽기</span><b>${fmtNum(u.cacheRead)}</b>
       <span>출력 토큰</span><b>${fmtNum(u.output)}</b>
-      <span>비용</span><b>$${(u.costUsd || 0).toFixed(3)}</b>
+      <span>비용</span><b>$${(u.costUsd || 0).toFixed(3)}</b>`}
     </div>
     ${busy ? `<div class="stage-log" style="margin-top:.5rem"><span class="spinner"></span> ${esc(busyLabel())}</div>` : ''}
   </div>`;
   const su = $('#s-usage');
-  if (su) su.innerHTML = `<span>호출</span><b>${fmtNum(u.calls)}</b><span>입력/출력 토큰</span><b>${fmtNum(u.input)} / ${fmtNum(u.output)}</b><span>비용(추정)</span><b>$${(u.costUsd || 0).toFixed(3)}</b>`;
+  if (su) su.innerHTML = RUNTIME.artifact
+    ? `<span>호출</span><b>${fmtNum(u.calls)}</b><span>과금</span><b>claude.ai 구독 사용량</b>`
+    : `<span>호출</span><b>${fmtNum(u.calls)}</b><span>입력/출력 토큰</span><b>${fmtNum(u.input)} / ${fmtNum(u.output)}</b><span>비용(추정)</span><b>$${(u.costUsd || 0).toFixed(3)}</b>`;
 }
 
 function busyLabel() {
@@ -594,7 +643,7 @@ async function startInterview() {
   state.ui.questionStream = '';
   const resume = iv.messages.length > 0;
   await runTask('interview', async (signal) => {
-    const agent = getAgent();
+    const agent = await getAgent();
     const res = resume
       ? await agent.interviewResume(state.project, { ...interviewHandlers(), signal })
       : await agent.interviewStart(state.project, { ...interviewHandlers(), signal });
@@ -607,7 +656,7 @@ async function sendAnswer(text) {
   if (iv.status !== 'waiting') return;
   state.ui.questionStream = '';
   await runTask('interview', async (signal) => {
-    const agent = getAgent();
+    const agent = await getAgent();
     const res = await agent.interviewAnswer(state.project, text, { ...interviewHandlers(), signal });
     if (res.type === 'done') toast('인터뷰가 끝났습니다. 경험 카드를 확인하세요.', 'ok');
   });
@@ -616,7 +665,7 @@ async function sendAnswer(text) {
 async function finishInterview() {
   state.ui.questionStream = '';
   await runTask('interview', async (signal) => {
-    const agent = getAgent();
+    const agent = await getAgent();
     const res = await agent.interviewFinish(state.project, { ...interviewHandlers(), signal });
     if (res.forced) toast('인터뷰어가 정리를 마치지 못해 강제로 종료했습니다. 경험 카드를 직접 보완해 주세요.');
   });
@@ -657,7 +706,7 @@ function writeHandlers(q, signal) {
 async function writeQuestions(questions) {
   if (!hasApiKey()) { openSettings(); return; }
   await runTask('write', async (signal) => {
-    const agent = getAgent();
+    const agent = await getAgent();
     for (const q of questions) {
       if (signal.aborted) break;
       try {
@@ -677,7 +726,7 @@ async function writeQuestions(questions) {
 async function runOnAnswer(q, label, fn) {
   if (!hasApiKey()) { openSettings(); return; }
   await runTask('write', async (signal) => {
-    const agent = getAgent();
+    const agent = await getAgent();
     try {
       await fn(agent, writeHandlers(q, signal));
     } finally {
@@ -697,11 +746,29 @@ function manualEdit(q, text) {
 }
 
 async function copyText(text) {
-  try { await navigator.clipboard.writeText(text); toast('복사했습니다.', 'ok'); }
-  catch { toast('복사에 실패했습니다. 직접 선택해 복사해 주세요.', 'bad'); }
+  try { await navigator.clipboard.writeText(text); toast('복사했습니다.', 'ok'); return; } catch { /* 아래 대체 경로 */ }
+  try {
+    const ta = document.createElement('textarea');
+    ta.value = text; ta.setAttribute('readonly', ''); ta.style.position = 'fixed'; ta.style.left = '-9999px';
+    document.body.appendChild(ta); ta.select();
+    const ok = document.execCommand('copy');
+    ta.remove();
+    toast(ok ? '복사했습니다.' : '복사에 실패했습니다. 본문을 직접 선택해 복사해 주세요.', ok ? 'ok' : 'bad');
+  } catch { toast('복사에 실패했습니다. 본문을 직접 선택해 복사해 주세요.', 'bad'); }
 }
 
-function download(name, content, type = 'text/plain') {
+async function download(name, content, type = 'text/plain') {
+  if (RUNTIME.artifact) {
+    // 아티팩트 뷰어는 페이지가 시작한 다운로드를 막으므로 downloads 기능을 쓰고, 없으면 복사로 대체한다
+    if (RUNTIME.downloads) {
+      try { await RUNTIME.downloads.save({ filename: name, data: content }); toast('저장했습니다.', 'ok'); }
+      catch (e) { if (e?.code !== 'cancelled') { console.error(e); toast('저장이 취소되었거나 실패했습니다. 대신 복사합니다.'); await copyText(content); } }
+    } else {
+      toast('이 보기에서는 파일 저장이 지원되지 않아 내용을 복사합니다.');
+      await copyText(content);
+    }
+    return;
+  }
   const blob = new Blob([content], { type: `${type};charset=utf-8` });
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
@@ -758,6 +825,8 @@ async function importProject(file) {
 
 function openSettings() {
   const d = $('#settings-dialog');
+  for (const el of d.querySelectorAll('[data-mode]')) el.hidden = el.dataset.mode !== (RUNTIME.artifact ? 'artifact' : 'api');
+  $('#s-tier').innerHTML = TIERS.map((t) => `<option value="${t.id}" ${t.id === (state.settings.tier ?? 'complex') ? 'selected' : ''}>${esc(t.label)}</option>`).join('');
   $('#s-apikey').value = state.apiKey;
   $('#s-persist').checked = state.persistKey;
   $('#s-model').innerHTML = MODELS.map((m) => `<option value="${m.id}" ${m.id === state.settings.model ? 'selected' : ''}>${esc(m.label)} — ${esc(m.note)}</option>`).join('');
@@ -780,6 +849,7 @@ function saveSettingsFromForm() {
     ...state.settings,
     model: f.model.value,
     effort: f.effort.value,
+    tier: f.tier.value || 'complex',
     subheading: f.subheading.value,
     maxRevisions: Number(f.maxRevisions.value),
     fallbacks: f.fallbacks.checked,
@@ -823,17 +893,20 @@ const actions = {
   'open-project-menu': () => $('#project-dialog').showModal(),
   'close-project-menu': () => $('#project-dialog').close(),
   'export-project': () => exportProject(),
-  'new-project': () => {
+  'new-project': async () => {
     if (state.ui.busy) return toast('작업 중에는 초기화할 수 없습니다.', 'bad');
-    if (!confirm('현재 프로젝트(문항·경험 카드·답변)를 모두 지우고 새로 시작할까요?')) return;
-    state.project = newProject(); state.ui.stageLog = {}; save(); $('#project-dialog').close(); render();
+    $('#project-dialog').close();
+    if (!(await askConfirm('현재 프로젝트(문항·경험 카드·답변)를 모두 지우고 새로 시작할까요?', { ok: '모두 지우기', danger: true }))) return;
+    state.project = newProject(); state.ui.stageLog = {}; save(); render();
   },
+  'confirm-ok': () => $('#confirm-dialog').close('ok'),
+  'confirm-cancel': () => $('#confirm-dialog').close(''),
   'go-step': (el) => { const s = el.dataset.step; if (stepAllowed(s) && !state.ui.busy) { state.project.step = s; save(); render(); } },
   'q-add': () => { addQuestion(); save(); renderStage(); },
-  'q-remove': (el) => {
+  'q-remove': async (el) => {
     const id = el.dataset.id;
     const hasAnswer = state.project.answers[id]?.versions?.length;
-    if (hasAnswer && !confirm(`${id} 문항의 답변도 함께 삭제됩니다. 계속할까요?`)) return;
+    if (hasAnswer && !(await askConfirm(`${id} 문항의 답변도 함께 삭제됩니다. 계속할까요?`, { ok: '삭제', danger: true }))) return;
     state.project.questions = state.project.questions.filter((q) => q.id !== id);
     delete state.project.answers[id];
     for (const e of state.project.experiences) e.questionIds = (e.questionIds ?? []).filter((x) => x !== id);
@@ -841,7 +914,7 @@ const actions = {
   },
   'analyze-jd': async () => {
     if (!hasApiKey()) return openSettings();
-    const res = await runTask('jd', async (signal) => getAgent().analyzeJobPosting(state.project.profile.jobPosting, { signal }), { rerender: true });
+    const res = await runTask('jd', async (signal) => (await getAgent()).analyzeJobPosting(state.project.profile.jobPosting, { signal }), { rerender: true });
     if (!res) return;
     const p = state.project.profile;
     if (!p.company.trim() && res.company) p.company = res.company;
@@ -849,7 +922,7 @@ const actions = {
     if (res.level !== 'unknown') p.level = res.level;
     p.jdSummary = { competencies: res.competencies ?? [], talent: res.talent ?? '', notes: res.notes ?? '' };
     if (res.questions?.length) {
-      const replace = !state.project.questions.some((q) => q.text.trim()) || confirm(`공고에서 문항 ${res.questions.length}개를 찾았습니다. 기존 문항을 이것으로 교체할까요? (취소하면 뒤에 추가합니다)`);
+      const replace = !state.project.questions.some((q) => q.text.trim()) || (await askConfirm(`공고에서 문항 ${res.questions.length}개를 찾았습니다. 기존 문항을 이것으로 교체할까요? (취소하면 뒤에 추가합니다)`, { ok: '교체' }));
       if (replace) replaceQuestions();
       for (const q of res.questions) addQuestion({ text: q.text, limit: q.limit || 0, mode: q.mode === 'unknown' ? 'with' : q.mode, type: q.type });
       toast(`문항 ${res.questions.length}개를 ${replace ? '설정' : '추가'}했습니다. 글자수 기준을 확인하세요.`, 'ok');
@@ -863,16 +936,16 @@ const actions = {
   'iv-send': () => { const ta = $('#iv-answer'); const text = ta?.value.trim(); if (!text) return toast('답변을 입력해 주세요.', 'bad'); sendAnswer(text); },
   'iv-skip': () => sendAnswer(INTERVIEW_SKIP_ANSWER),
   'iv-finish': () => finishInterview(),
-  'iv-restart': () => { if (!confirm('인터뷰 대화를 지우고 처음부터 다시 할까요? (경험 카드는 유지됩니다)')) return; state.project.interview = emptyInterview(); save(); startInterview(); },
+  'iv-restart': async () => { if (!(await askConfirm('인터뷰 대화를 지우고 처음부터 다시 할까요? (경험 카드는 유지됩니다)', { ok: '처음부터', danger: true }))) return; state.project.interview = emptyInterview(); save(); startInterview(); },
   'iv-resume': () => startInterview(),
   'go-write': () => { state.project.step = 'write'; save(); render(); },
   'go-done': () => { state.project.step = 'done'; save(); render(); },
   'stop': () => { state.ui.abort?.abort(); },
-  'write-all': () => {
+  'write-all': async () => {
     const p = state.project;
     const pending = p.questions.filter((q) => !(p.answers[q.id]?.versions?.length));
     const list = pending.length ? pending : p.questions;
-    if (!pending.length && !confirm('모든 문항을 다시 생성할까요? 기존 답변은 버전으로 남습니다.')) return;
+    if (!pending.length && !(await askConfirm('모든 문항을 다시 생성할까요? 기존 답변은 버전으로 남습니다.', { ok: '다시 생성' }))) return;
     writeQuestions(list);
   },
   'write-one': (el) => { const q = state.project.questions.find((x) => x.id === el.dataset.id); if (q) writeQuestions([q]); },
@@ -909,12 +982,12 @@ const actions = {
   'download-md': () => download(`${state.project.profile.company || '자소서'}_자기소개서.md`, finalText(true), 'text/markdown'),
   'prep': async () => {
     if (!hasApiKey()) return openSettings();
-    const res = await runTask('prep', async (signal) => getAgent().interviewPrep(state.project, { signal }));
+    const res = await runTask('prep', async (signal) => (await getAgent()).interviewPrep(state.project, { signal }));
     if (res) { state.project.prep = res; save(); render(); }
   },
   'exp-add': () => openExpDialog(null),
   'exp-edit': (el) => openExpDialog(state.project.experiences.find((e) => e.id === el.dataset.id)),
-  'exp-delete': (el) => { if (!confirm('이 경험 카드를 삭제할까요?')) return; state.project.experiences = state.project.experiences.filter((e) => e.id !== el.dataset.id); save(); renderSide(); },
+  'exp-delete': async (el) => { if (!(await askConfirm('이 경험 카드를 삭제할까요?', { ok: '삭제', danger: true }))) return; state.project.experiences = state.project.experiences.filter((e) => e.id !== el.dataset.id); save(); renderSide(); },
   'close-exp': () => $('#exp-dialog').close(),
 };
 
@@ -925,7 +998,7 @@ document.addEventListener('click', (ev) => {
   if (fn) { ev.preventDefault(); fn(el); }
 });
 
-document.addEventListener('change', (ev) => {
+document.addEventListener('change', async (ev) => {
   const el = ev.target;
   if (el.dataset.actionChange === 'q-template') {
     const tpl = el.value === '' ? null : COMMON_QUESTIONS[Number(el.value)];
@@ -934,7 +1007,8 @@ document.addEventListener('change', (ev) => {
   } else if (el.dataset.actionChange === 'q-preset') {
     const preset = COMPANY_PRESETS.find((c) => c.id === el.value);
     if (preset) {
-      const replace = !state.project.questions.some((q) => q.text.trim()) || confirm(`「${preset.name}」 문항 ${preset.questions.length}개로 기존 문항을 교체할까요? (취소하면 뒤에 추가)\n${preset.note}`);
+      el.value = '';
+      const replace = !state.project.questions.some((q) => q.text.trim()) || (await askConfirm(`「${preset.name}」 문항 ${preset.questions.length}개로 기존 문항을 교체할까요? (취소하면 뒤에 추가)\n${preset.note}`, { ok: '교체' }));
       if (replace) replaceQuestions();
       for (const q of preset.questions) addQuestion(q);
       save(); renderStage();
@@ -990,5 +1064,12 @@ window.addEventListener('beforeunload', (ev) => { if (state.ui.busy) { ev.preven
 // 디버깅·E2E용 최소 노출
 window.__jaso = { state, render, actions };
 
+const badge = $('#runtime-badge');
+if (badge) { badge.hidden = false; badge.textContent = RUNTIME.artifact ? 'claude.ai 구독' : 'API 키'; }
+const footer = $('#site-footer');
+if (footer) footer.textContent = RUNTIME.artifact
+  ? '개인용 도구입니다. 입력한 내용은 이 브라우저에만 저장되며, Claude 호출은 보는 사람의 claude.ai 구독 사용량으로 이뤄집니다.'
+  : '개인용 도구입니다. API 키는 이 브라우저에서 Anthropic API로 직접 전송되며, 이 사이트의 서버로는 아무것도 보내지 않습니다.';
 render();
-if (!hasApiKey() && !state.project.questions.length) setTimeout(() => toast('먼저 설정에서 Anthropic API 키를 입력하세요.'), 300);
+initRuntime();
+if (!RUNTIME.artifact && !hasApiKey() && !state.project.questions.length) setTimeout(() => toast('먼저 설정에서 Anthropic API 키를 입력하세요.'), 300);

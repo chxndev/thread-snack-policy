@@ -1,49 +1,30 @@
-// 자소서 에이전트 코어: 인터뷰 루프(tool use) + 작성·첨삭·수정 파이프라인
-// SDK 클라이언트는 주입받는다(테스트에서는 가짜 클라이언트 사용).
+// 자소서 에이전트 코어: 인터뷰 상태 관리 + 작성·첨삭·수정 파이프라인.
+// LLM 호출은 제공자(provider)에 위임한다: SDK(API 키) 또는 claude.ai 아티팩트(sample).
 
 import {
-  INTERVIEWER_SYSTEM, INTERVIEW_TOOLS, WRITER_SYSTEM, CRITIC_SYSTEM, CRITIQUE_SCHEMA,
-  computeTotal, buildInterviewOpening, buildDraftRequest, buildCritiqueRequest,
-  buildReviseRequest, buildLengthFixRequest, buildEditRequest, INTERVIEW_FINISH_REQUEST,
+  WRITER_SYSTEM, CRITIC_SYSTEM, CRITIQUE_SCHEMA, computeTotal,
+  buildDraftRequest, buildCritiqueRequest, buildReviseRequest, buildLengthFixRequest, buildEditRequest,
   JD_ANALYST_SYSTEM, JD_SCHEMA, buildJdRequest,
   INTERVIEW_PREP_SYSTEM, INTERVIEW_PREP_SCHEMA, buildInterviewPrepRequest,
   buildAlternativeRequest, buildSelectionEditRequest,
 } from './prompts.js';
 import { judgeLength, cleanModelText, validateSchema, uid } from './text.js';
+import { AgentError, FALLBACK_MODELS } from './errors.js';
+import { upsertExperience } from './experiences.js';
+import { emptyInterview } from './interview.js';
+import { createSdkProvider, textOf, stripPreFallback } from './llm-sdk.js';
 
-/** 서버 측 안전 분류기 폴백(fallbacks: "default")을 지원하는 모델 */
-export const FALLBACK_MODELS = new Set(['claude-opus-5-5', 'claude-sonnet-5-5', 'claude-fable-5-1']);
+export { AgentError, FALLBACK_MODELS, upsertExperience, emptyInterview, textOf, stripPreFallback };
 
 export const DEFAULT_SETTINGS = {
   model: 'claude-opus-5-5',
-  effort: 'high', // 작성·수정 단계 effort. 인터뷰·첨삭은 medium 고정
+  effort: 'high', // SDK: 작성·수정 단계 effort (인터뷰·첨삭은 medium 고정)
+  tier: 'complex', // claude.ai: 작성·수정 단계 모델 등급 (나머지는 default)
   fallbacks: true,
   baseURL: '',
   subheading: 'auto', // auto | on | off
   maxRevisions: 2,
 };
-
-export class AgentError extends Error {
-  constructor(code, message, extra = {}) {
-    super(message);
-    this.name = 'AgentError';
-    this.code = code;
-    Object.assign(this, extra);
-  }
-}
-
-const TOOL_SCHEMAS = Object.fromEntries(INTERVIEW_TOOLS.map((t) => [t.name, t.input_schema]));
-
-export function textOf(message) {
-  return (message?.content ?? [])
-    .filter((b) => b.type === 'text')
-    .map((b) => b.text)
-    .join('');
-}
-
-export function emptyInterview() {
-  return { status: 'idle', messages: [], transcript: [], pending: null, summary: '', writerNotes: '', questionCount: 0 };
-}
 
 export function ensureAnswer(project, questionId) {
   project.answers ??= {};
@@ -51,15 +32,13 @@ export function ensureAnswer(project, questionId) {
   return project.answers[questionId];
 }
 
-export function currentText(answer) {
-  if (!answer?.versions?.length) return '';
-  const v = answer.versions.find((x) => x.id === answer.currentVersionId) ?? answer.versions[answer.versions.length - 1];
-  return v?.text ?? '';
-}
-
 export function currentVersion(answer) {
   if (!answer?.versions?.length) return null;
   return answer.versions.find((x) => x.id === answer.currentVersionId) ?? answer.versions[answer.versions.length - 1];
+}
+
+export function currentText(answer) {
+  return currentVersion(answer)?.text ?? '';
 }
 
 export function addVersion(answer, text, label, extra = {}) {
@@ -67,40 +46,6 @@ export function addVersion(answer, text, label, extra = {}) {
   answer.versions.push(v);
   answer.currentVersionId = v.id;
   return v;
-}
-
-/** 경험 카드 저장/갱신 (인터뷰 도구·수동 입력 공용) */
-export function upsertExperience(project, input, source = 'interview') {
-  project.experiences ??= [];
-  const clean = (s) => (typeof s === 'string' ? s.trim() : '');
-  const card = {
-    title: clean(input.title),
-    situation: clean(input.situation),
-    task: clean(input.task),
-    action: clean(input.action),
-    result: clean(input.result),
-    learned: clean(input.learned),
-    keywords: Array.isArray(input.keywords) ? input.keywords.map(clean).filter(Boolean) : [],
-    questionIds: Array.isArray(input.question_ids ?? input.questionIds)
-      ? (input.question_ids ?? input.questionIds).map(clean).filter((id) => project.questions?.some((q) => q.id === id))
-      : [],
-    source,
-  };
-  const id = clean(input.id);
-  const existing = id ? project.experiences.find((e) => e.id === id) : null;
-  if (existing) {
-    // 갱신: 새 값이 비어 있으면 기존 값 유지
-    for (const k of ['title', 'situation', 'task', 'action', 'result', 'learned']) {
-      if (card[k]) existing[k] = card[k];
-    }
-    if (card.keywords.length) existing.keywords = card.keywords;
-    if (card.questionIds.length) existing.questionIds = card.questionIds;
-    existing.updatedAt = Date.now();
-    return existing;
-  }
-  const created = { id: uid('exp'), ...card, createdAt: Date.now(), updatedAt: Date.now() };
-  project.experiences.push(created);
-  return created;
 }
 
 function completedAnswers(project, exceptId) {
@@ -112,178 +57,21 @@ function completedAnswers(project, exceptId) {
 }
 
 /**
- * 서버 측 폴백이 응답 도중 일어난 경우: 마지막 fallback 블록 앞의 thinking/tool_use 등 모델 내부 블록은
- * 실행하지도, 되돌려 보내지도 않는다(text 블록과 경계 이후 블록만 유지).
+ * @param {object} opts
+ * @param {object} [opts.provider]  llm-sdk.js / llm-sample.js 제공자
+ * @param {object} [opts.client]    provider가 없을 때 SDK 제공자를 만들 클라이언트
  */
-export function stripPreFallback(content) {
-  if (!Array.isArray(content)) return [];
-  let last = -1;
-  content.forEach((b, i) => { if (b?.type === 'fallback') last = i; });
-  if (last < 0) return content;
-  return content.filter((b, i) => (i > last ? true : b.type === 'text'));
-}
-
-export function createAgent({ client, settings = {}, onUsage, isApiError = () => false, isToolJsonError = () => false }) {
+export function createAgent({ provider, client, settings = {}, onUsage, isApiError = () => false, isToolJsonError = () => false }) {
   const cfg = { ...DEFAULT_SETTINGS, ...settings };
-  const eager = !cfg.baseURL; // 프록시 경유 시 eager_input_streaming 생략
-
-  function baseParams({ system, messages, maxTokens = 64000, effort = 'medium', tools, format, autoCache = false }) {
-    const params = {
-      model: cfg.model,
-      max_tokens: maxTokens,
-      system: [{ type: 'text', text: system, cache_control: { type: 'ephemeral' } }],
-      messages,
-      output_config: { effort },
-    };
-    if (autoCache) params.cache_control = { type: 'ephemeral' };
-    if (tools) params.tools = tools.map((t) => (eager ? { ...t, eager_input_streaming: true } : { ...t }));
-    if (format) params.output_config.format = { type: 'json_schema', schema: format };
-    if (cfg.fallbacks !== false && FALLBACK_MODELS.has(cfg.model)) {
-      params.betas = ['server-side-fallback-2026-07-01'];
-      params.fallbacks = 'default';
-    }
-    return params;
-  }
-
-  // UI 콜백의 예외가 스트림 오류로 둔갑하지 않도록 감싼다
-  const safe = (fn) => (...args) => { try { fn?.(...args); } catch (e) { console.error('handler error', e); } };
-
-  async function call(params, handlers = {}) {
-    let jsonRetries = 0;
-    for (;;) {
-      const stream = client.beta.messages.stream(params);
-      const onAbort = () => stream.abort();
-      handlers.signal?.addEventListener('abort', onAbort, { once: true });
-      let currentTool = null;
-      if (handlers.onText) stream.on('text', safe(handlers.onText));
-      if (handlers.onToolJson) {
-        stream.on('streamEvent', safe((ev) => {
-          if (ev.type === 'content_block_start' && ev.content_block?.type === 'tool_use') currentTool = ev.content_block.name;
-          if (ev.type === 'content_block_stop') currentTool = null;
-        }));
-        stream.on('inputJson', safe((_partial, snapshot) => handlers.onToolJson(currentTool, snapshot)));
-      }
-      try {
-        const message = await stream.finalMessage();
-        try { onUsage?.({ model: message.model, usage: message.usage, stopReason: message.stop_reason, message }); } catch (e) { console.error('usage handler error', e); }
-        return message;
-      } catch (err) {
-        if (handlers.signal?.aborted) throw new AgentError('aborted', '중단했습니다.');
-        // eager 스트리밍에서 SDK가 도구 입력 JSON을 해석하지 못한 경우만 재시도 (API 오류 등은 그대로 전달)
-        if (params.tools && isToolJsonError(err) && jsonRetries++ < 2) continue;
-        throw err;
-      } finally {
-        handlers.signal?.removeEventListener('abort', onAbort);
-      }
-    }
-  }
-
-  function checkStop(message, { toolTurn = false } = {}) {
-    if (message.stop_reason === 'refusal') {
-      throw new AgentError('refusal', '모델이 이 요청을 거절했습니다. 표현을 바꾸거나 다른 모델을 선택해 보세요.', {
-        detail: message.stop_details?.explanation ?? '',
-      });
-    }
-    if (message.stop_reason === 'max_tokens') {
-      throw new AgentError('max_tokens', toolTurn
-        ? '응답이 길이 제한(max_tokens)에 걸려 잘렸습니다. 다시 시도해 주세요.'
-        : '응답이 길이 제한(max_tokens)에 걸려 잘렸습니다. 작성 품질(effort)을 낮추거나 다시 시도해 주세요.');
-    }
-    return 'ok';
-  }
+  const llm = provider ?? createSdkProvider({ client, cfg, onUsage, isApiError, isToolJsonError });
+  const writerRole = { role: 'writer', effort: cfg.effort };
 
   // ───────────── 인터뷰 ─────────────
 
-  async function interviewStep(project, handlers = {}) {
-    const iv = project.interview;
-    for (let guard = 0; guard < 6; guard++) {
-      const params = baseParams({
-        system: INTERVIEWER_SYSTEM,
-        messages: iv.messages,
-        effort: 'medium',
-        tools: INTERVIEW_TOOLS,
-        maxTokens: 32000,
-        autoCache: true,
-      });
-      const message = await call(params, {
-        signal: handlers.signal,
-        onToolJson: (tool, snapshot) => {
-          if (tool === 'ask_user' && snapshot && typeof snapshot.question === 'string') handlers.onQuestionDelta?.(snapshot.question);
-        },
-      });
-      const content = stripPreFallback(message.content);
-      const toolUses = content.filter((b) => b.type === 'tool_use');
-      checkStop(message, { toolTurn: toolUses.length > 0 });
-      iv.messages.push({ role: 'assistant', content }); // thinking 블록 포함, 그대로 되돌려 보낸다
-
-      if (!toolUses.length) {
-        const text = textOf(message).trim();
-        if (text) {
-          // 도구 없이 텍스트로 물어본 경우: 질문으로 취급
-          iv.pending = { toolUseId: null, results: [], question: text, why: '', example: '' };
-          iv.transcript.push({ role: 'agent', kind: 'question', text, why: '', example: '' });
-          iv.questionCount += 1;
-          iv.status = 'waiting';
-          return { type: 'question', question: iv.pending };
-        }
-        iv.messages.push({ role: 'user', content: '도구를 사용하세요. ask_user로 질문하거나 finish_interview로 인터뷰를 마치세요.' });
-        continue;
-      }
-
-      const results = [];
-      let ask = null;
-      let finished = null;
-      for (const tu of toolUses) {
-        const schema = TOOL_SCHEMAS[tu.name];
-        const errors = schema ? validateSchema(tu.input, schema) : ['unknown tool'];
-        if (errors.length) {
-          results.push({
-            type: 'tool_result', tool_use_id: tu.id, is_error: true,
-            content: JSON.stringify({ INVALID_JSON: JSON.stringify(tu.input ?? null), errors }),
-          });
-          continue;
-        }
-        if (tu.name === 'save_experience') {
-          const card = upsertExperience(project, tu.input, 'interview');
-          results.push({ type: 'tool_result', tool_use_id: tu.id, content: `저장됨: id=${card.id}` });
-          handlers.onExperience?.(card);
-        } else if (tu.name === 'finish_interview') {
-          finished = tu.input;
-          results.push({ type: 'tool_result', tool_use_id: tu.id, content: '인터뷰를 종료했습니다.' });
-        } else if (tu.name === 'ask_user') {
-          if (!ask) ask = { toolUseId: tu.id, ...tu.input };
-          else results.push({ type: 'tool_result', tool_use_id: tu.id, content: '(한 턴에 질문은 하나만 할 수 있습니다. 이 질문은 다음 턴에 다시 하세요.)' });
-        }
-      }
-
-      if (finished) {
-        // 같은 턴에 질문도 있었다면 tool_result를 채워 히스토리를 유효하게 유지한다
-        if (ask) results.push({ type: 'tool_result', tool_use_id: ask.toolUseId, content: '(인터뷰가 종료되어 이 질문은 생략합니다.)' });
-        iv.messages.push({ role: 'user', content: results });
-        iv.summary = finished.summary ?? '';
-        iv.writerNotes = finished.writer_notes ?? '';
-        iv.pending = null;
-        iv.status = 'done';
-        iv.transcript.push({ role: 'agent', kind: 'summary', text: iv.summary });
-        return { type: 'done', summary: iv.summary };
-      }
-      if (ask) {
-        iv.pending = { toolUseId: ask.toolUseId, results, question: ask.question, why: ask.why ?? '', example: ask.example ?? '' };
-        iv.transcript.push({ role: 'agent', kind: 'question', text: ask.question, why: ask.why ?? '', example: ask.example ?? '' });
-        iv.questionCount += 1;
-        iv.status = 'waiting';
-        return { type: 'question', question: iv.pending };
-      }
-      // 저장만 한 턴: 결과를 돌려주고 계속
-      iv.messages.push({ role: 'user', content: results });
-    }
-    throw new AgentError('loop', '인터뷰어가 질문 없이 도구 호출만 반복했습니다. 다시 시도해 주세요.');
-  }
-
-  /** 인터뷰 턴 실행. 실패·중단 시 status를 idle로 되돌려 interviewResume으로 이어갈 수 있게 한다. */
+  /** 인터뷰 턴 실행. 실패·중단 시 status를 재개 가능한 상태로 되돌린다. */
   async function guardedStep(project, handlers) {
     try {
-      return await interviewStep(project, handlers);
+      return await llm.interviewStep(project, handlers);
     } catch (err) {
       const iv = project.interview;
       if (iv.status === 'running') iv.status = iv.pending ? 'waiting' : 'idle';
@@ -292,38 +80,19 @@ export function createAgent({ client, settings = {}, onUsage, isApiError = () =>
   }
 
   async function interviewStart(project, handlers = {}) {
-    project.interview = { ...emptyInterview(), status: 'running', messages: [{ role: 'user', content: buildInterviewOpening(project) }] };
+    project.interview = { ...emptyInterview(), status: 'running', messages: llm.openInterview(project) };
     return guardedStep(project, handlers);
   }
 
-  /** 중단·새로고침 뒤 이어서 진행: 마지막 user 턴에 대한 응답을 다시 요청한다(히스토리는 그대로). */
+  /** 중단·새로고침 뒤 이어서 진행 */
   async function interviewResume(project, handlers = {}) {
     const iv = project.interview;
     if (iv.status === 'done') return { type: 'done', summary: iv.summary };
     if (iv.pending) { iv.status = 'waiting'; return { type: 'question', question: iv.pending }; }
     if (!iv.messages.length) return interviewStart(project, handlers);
-    const last = iv.messages[iv.messages.length - 1];
-    if (last.role === 'assistant') {
-      const unanswered = Array.isArray(last.content) && last.content.some((b) => b.type === 'tool_use');
-      // tool_result 없이 끝난 도구 호출 턴은 되돌려 보낼 수 없으므로 버리고 다시 생성한다(그 앞 히스토리는 그대로)
-      if (unanswered && iv.messages.length > 1) iv.messages.pop();
-      else iv.messages.push({ role: 'user', content: '계속 진행하세요. ask_user로 질문하거나 finish_interview로 인터뷰를 마치세요.' });
-    }
+    llm.prepareResume(iv);
     iv.status = 'running';
     return guardedStep(project, handlers);
-  }
-
-  function pushUserTurn(iv, text) {
-    const p = iv.pending;
-    if (p?.toolUseId) {
-      iv.messages.push({ role: 'user', content: [...(p.results ?? []), { type: 'tool_result', tool_use_id: p.toolUseId, content: text }] });
-    } else if (p && p.results?.length) {
-      iv.messages.push({ role: 'user', content: [...p.results, { type: 'text', text }] });
-    } else {
-      iv.messages.push({ role: 'user', content: text });
-    }
-    iv.pending = null;
-    iv.status = 'running';
   }
 
   async function interviewAnswer(project, answerText, handlers = {}) {
@@ -332,7 +101,9 @@ export function createAgent({ client, settings = {}, onUsage, isApiError = () =>
     const text = String(answerText ?? '').trim();
     if (!text) throw new AgentError('input', '답변을 입력해 주세요.');
     iv.transcript.push({ role: 'user', kind: 'answer', text });
-    pushUserTurn(iv, text);
+    llm.pushUserTurn(iv, text);
+    iv.pending = null;
+    iv.status = 'running';
     return guardedStep(project, handlers);
   }
 
@@ -341,12 +112,13 @@ export function createAgent({ client, settings = {}, onUsage, isApiError = () =>
     if (iv.status === 'done') return { type: 'done', summary: iv.summary };
     if (iv.status !== 'waiting') throw new AgentError('state', '에이전트가 응답 중입니다. 잠시 후 다시 시도해 주세요.');
     iv.transcript.push({ role: 'user', kind: 'answer', text: '(인터뷰를 여기서 마칠게요)' });
-    pushUserTurn(iv, INTERVIEW_FINISH_REQUEST);
+    llm.pushUserTurn(iv, llm.finishRequest);
+    iv.pending = null;
+    iv.status = 'running';
     const res = await guardedStep(project, handlers);
     if (res.type !== 'done') {
-      // 모델이 그래도 질문하면 강제 종료
       iv.pending = null;
-      iv.status = 'done';
+      iv.status = 'done'; // 모델이 그래도 질문하면 강제 종료
       return { type: 'done', summary: iv.summary, forced: true };
     }
     return res;
@@ -354,111 +126,55 @@ export function createAgent({ client, settings = {}, onUsage, isApiError = () =>
 
   // ───────────── 작성 파이프라인 ─────────────
 
+  async function structured(system, user, schema, { role = 'critic', signal, label = '결과' } = {}) {
+    const parsed = await llm.json({ system, user, schema, role, effort: 'medium', signal, label });
+    const errors = validateSchema(parsed, schema);
+    if (errors.length) throw new AgentError('parse', `${label} 형식 오류: ${errors.slice(0, 3).join(', ')}`);
+    return parsed;
+  }
+
+  async function write(user, handlers = {}, { role = 'writer', effort = cfg.effort } = {}) {
+    const out = await llm.text({ system: WRITER_SYSTEM, user, role, effort, onText: handlers.onText, signal: handlers.signal });
+    return cleanModelText(out);
+  }
+
   async function draft(project, question, handlers = {}) {
-    const params = baseParams({
-      system: WRITER_SYSTEM,
-      messages: [{ role: 'user', content: buildDraftRequest(project, question, { otherAnswers: completedAnswers(project, question.id), subheading: cfg.subheading }) }],
-      effort: cfg.effort,
-    });
-    const message = await call(params, { signal: handlers.signal, onText: handlers.onText });
-    checkStop(message);
-    return cleanModelText(textOf(message));
+    return write(buildDraftRequest(project, question, { otherAnswers: completedAnswers(project, question.id), subheading: cfg.subheading }), handlers, writerRole);
   }
 
   async function critique(project, question, text, handlers = {}) {
-    const params = baseParams({
-      system: CRITIC_SYSTEM,
-      messages: [{ role: 'user', content: buildCritiqueRequest(project, question, text, { subheading: cfg.subheading }) }],
-      effort: 'medium',
-      format: CRITIQUE_SCHEMA,
-      maxTokens: 32000,
-    });
-    const message = await call(params, { signal: handlers.signal });
-    checkStop(message);
-    let parsed;
-    try {
-      parsed = JSON.parse(textOf(message));
-    } catch {
-      throw new AgentError('parse', '첨삭 결과(JSON)를 해석하지 못했습니다.');
-    }
-    const errors = validateSchema(parsed, CRITIQUE_SCHEMA);
-    if (errors.length) throw new AgentError('parse', `첨삭 결과 형식 오류: ${errors.slice(0, 3).join(', ')}`);
+    const parsed = await structured(CRITIC_SYSTEM, buildCritiqueRequest(project, question, text, { subheading: cfg.subheading }), CRITIQUE_SCHEMA, { signal: handlers.signal, label: '첨삭 결과' });
     parsed.total = computeTotal(parsed.scores);
-    const length = judgeLength(text, question.limit, question.mode);
-    parsed.length = length;
+    parsed.length = judgeLength(text, question.limit, question.mode);
     // 글자수는 파이프라인이 별도(lengthFix)로 맞추므로 내용 기준으로만 재작성 여부를 정한다
     parsed.needs_revision = parsed.total < 80 || parsed.must_fix.length > 0;
     return parsed;
   }
 
   async function revise(project, question, text, crit, handlers = {}) {
-    const params = baseParams({
-      system: WRITER_SYSTEM,
-      messages: [{ role: 'user', content: buildReviseRequest(project, question, text, crit, { subheading: cfg.subheading, otherAnswers: completedAnswers(project, question.id) }) }],
-      effort: cfg.effort,
-    });
-    const message = await call(params, { signal: handlers.signal, onText: handlers.onText });
-    checkStop(message);
-    return cleanModelText(textOf(message));
+    return write(buildReviseRequest(project, question, text, crit, { subheading: cfg.subheading, otherAnswers: completedAnswers(project, question.id) }), handlers, writerRole);
   }
 
   async function lengthFix(project, question, text, handlers = {}) {
-    const params = baseParams({
-      system: WRITER_SYSTEM,
-      messages: [{ role: 'user', content: buildLengthFixRequest(project, question, text) }],
-      effort: 'medium',
-    });
-    const message = await call(params, { signal: handlers.signal, onText: handlers.onText });
-    checkStop(message);
-    return cleanModelText(textOf(message));
+    return write(buildLengthFixRequest(project, question, text), handlers, { role: 'editor', effort: 'medium' });
   }
 
   async function edit(project, question, text, instruction, handlers = {}) {
-    const params = baseParams({
-      system: WRITER_SYSTEM,
-      messages: [{ role: 'user', content: buildEditRequest(project, question, text, instruction) }],
-      effort: cfg.effort,
-    });
-    const message = await call(params, { signal: handlers.signal, onText: handlers.onText });
-    checkStop(message);
-    return cleanModelText(textOf(message));
-  }
-
-  async function structured(system, content, schema, { effort = 'medium', signal, label = '결과' } = {}) {
-    const params = baseParams({
-      system,
-      messages: [{ role: 'user', content }],
-      effort,
-      format: schema,
-      maxTokens: 32000,
-    });
-    const message = await call(params, { signal });
-    checkStop(message);
-    let parsed;
-    try {
-      parsed = JSON.parse(textOf(message));
-    } catch {
-      throw new AgentError('parse', `${label}(JSON)를 해석하지 못했습니다.`);
-    }
-    const errors = validateSchema(parsed, schema);
-    if (errors.length) throw new AgentError('parse', `${label} 형식 오류: ${errors.slice(0, 3).join(', ')}`);
-    return parsed;
+    return write(buildEditRequest(project, question, text, instruction), handlers, writerRole);
   }
 
   /** 채용 공고 텍스트에서 회사·직무·문항·역량 추출 */
   async function analyzeJobPosting(postingText, handlers = {}) {
     const text = String(postingText ?? '').trim();
     if (!text) throw new AgentError('input', '공고 내용을 붙여 넣어 주세요.');
-    return structured(JD_ANALYST_SYSTEM, buildJdRequest(text), JD_SCHEMA, { signal: handlers.signal, label: '공고 분석 결과' });
+    return structured(JD_ANALYST_SYSTEM, buildJdRequest(text), JD_SCHEMA, { role: 'analyst', signal: handlers.signal, label: '공고 분석 결과' });
   }
 
   /** 완성된 자소서 기반 면접 예상 질문 */
   async function interviewPrep(project, handlers = {}) {
     const answers = completedAnswers(project, null);
     if (!answers.length) throw new AgentError('state', '완성된 답변이 없습니다.');
-    return structured(INTERVIEW_PREP_SYSTEM, buildInterviewPrepRequest(project, answers), INTERVIEW_PREP_SCHEMA, {
-      signal: handlers.signal, label: '면접 예상 질문',
-    });
+    return structured(INTERVIEW_PREP_SYSTEM, buildInterviewPrepRequest(project, answers), INTERVIEW_PREP_SCHEMA, { role: 'analyst', signal: handlers.signal, label: '면접 예상 질문' });
   }
 
   /** 기존 답변과 다른 각도의 대안 버전 생성 */
@@ -469,14 +185,8 @@ export function createAgent({ client, settings = {}, onUsage, isApiError = () =>
     ans.status = 'drafting';
     try {
       handlers.onStage?.('alternative');
-      const params = baseParams({
-        system: WRITER_SYSTEM,
-        messages: [{ role: 'user', content: buildAlternativeRequest(project, question, existing, { otherAnswers: completedAnswers(project, question.id), subheading: cfg.subheading }) }],
-        effort: cfg.effort,
-      });
-      const message = await call(params, { signal: handlers.signal, onText: handlers.onText });
-      checkStop(message);
-      const version = addVersion(ans, cleanModelText(textOf(message)), '대안 버전');
+      const out = await write(buildAlternativeRequest(project, question, existing, { otherAnswers: completedAnswers(project, question.id), subheading: cfg.subheading }), handlers, writerRole);
+      const version = addVersion(ans, out, '대안 버전');
       handlers.onVersion?.(version);
       ans.status = 'done';
       return version;
@@ -495,14 +205,8 @@ export function createAgent({ client, settings = {}, onUsage, isApiError = () =>
     ans.status = 'revising';
     try {
       handlers.onStage?.('edit');
-      const params = baseParams({
-        system: WRITER_SYSTEM,
-        messages: [{ role: 'user', content: buildSelectionEditRequest(project, question, text, selection, instruction) }],
-        effort: 'medium',
-      });
-      const message = await call(params, { signal: handlers.signal, onText: handlers.onText });
-      checkStop(message);
-      const version = addVersion(ans, cleanModelText(textOf(message)), `부분 수정: ${instruction.slice(0, 16)}`);
+      const out = await write(buildSelectionEditRequest(project, question, text, selection, instruction), handlers, { role: 'editor', effort: 'medium' });
+      const version = addVersion(ans, out, `부분 수정: ${instruction.slice(0, 16)}`);
       handlers.onVersion?.(version);
       ans.status = 'done';
       return version;
@@ -604,6 +308,7 @@ export function createAgent({ client, settings = {}, onUsage, isApiError = () =>
 
   return {
     cfg,
+    provider: llm,
     interviewStart,
     interviewResume,
     interviewAnswer,

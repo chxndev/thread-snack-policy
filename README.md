@@ -11,7 +11,14 @@
 
 ## 자소서 에이전트 (`/jaso/`)
 
-지원 정보와 문항을 넣으면 AI가 **경험을 인터뷰**하고, **초안을 쓰고**, **인사담당자 관점으로 첨삭**한 뒤, **글자수에 맞춰** 자기소개서를 완성하는 브라우저 앱입니다. 서버 없이 동작하며, 사용자의 Anthropic API 키로 브라우저에서 Claude API를 직접 호출합니다.
+지원 정보와 문항을 넣으면 AI가 **경험을 인터뷰**하고, **초안을 쓰고**, **인사담당자 관점으로 첨삭**한 뒤, **글자수에 맞춰** 자기소개서를 완성하는 브라우저 앱입니다. 서버 없이 동작하며, 두 가지 방식으로 Claude를 호출합니다.
+
+| 실행 환경 | Claude 호출 방식 | 필요한 것 |
+| --- | --- | --- |
+| **claude.ai 아티팩트** (권장, Team/Pro 등 구독) | 아티팩트 `sample` 기능으로 보는 사람의 claude.ai 구독 사용량을 씀 | claude.ai 로그인, 첫 호출 때 허용 |
+| GitHub Pages·로컬 서버 | 브라우저에서 Anthropic API를 직접 호출 | Anthropic API 키(별도 과금) |
+
+앱은 `window.claude`가 있으면 아티팩트 모드로, 없으면 API 키 모드로 자동 전환합니다. 두 모드는 같은 코드(`jaso/src/`)를 쓰며 LLM 호출 계층만 다릅니다(`llm-sample.js` / `llm-sdk.js`).
 
 ### 흐름
 
@@ -27,11 +34,18 @@
 - **글자수 제어** — 공백 포함/공백 제외/바이트(한글 2byte) 세 기준을 지원하고(줄바꿈은 1자), 목표 범위(제한의 90~100%, 작성 목표는 상한의 96%)를 벗어나면 별도 조정 단계를 돌립니다. 판정은 모델이 아니라 코드가 합니다.
 - **블라인드 채용 대응** — 체크하면 인터뷰어는 학교명·가족·출신지·나이·성별을 묻지 않고, 작성자는 쓰지 않으며, 첨삭은 기재 시 필수 수정으로 잡습니다.
 - **에이전트 루프** — 인터뷰는 `ask_user` / `save_experience` / `finish_interview` 도구를 쓰는 tool-use 루프이며, 히스토리는 append-only로 유지하고 thinking 블록을 그대로 되돌려 보냅니다(preserved thinking 호환).
-- **모델** — 기본 `claude-opus-5-5`, 선택으로 `claude-sonnet-5-5`, `claude-fable-5-1`. 안전 분류기 거절 시 서버 측 폴백(`fallbacks: "default"`)을 기본으로 켭니다. 초안·수정은 설정한 effort, 인터뷰·첨삭은 `medium`.
+- **모델** — 아티팩트 모드는 claude.ai 모델 등급(complex/default/quick)을 고르며 초안·수정은 `complex`, 인터뷰·첨삭·분석은 `default`로 실행합니다. API 키 모드는 기본 `claude-opus-5-5`, 선택으로 `claude-sonnet-5-5`, `claude-fable-5-1`이고 안전 분류기 거절 시 서버 측 폴백(`fallbacks: "default"`)을 켭니다.
+- **아티팩트 모드의 차이** — 시스템 프롬프트와 도구 호출이 없으므로 지시를 프롬프트 앞에 붙이고, 인터뷰는 JSON 턴(저장할 카드·다음 질문·종료)으로 진행합니다. 파일 저장은 `downloads` 기능을 쓰고, 확인 창은 페이지 안의 대화상자로 대체합니다.
 
 ### 실행
 
-GitHub Pages라면 `https://<user>.github.io/<repo>/jaso/`에서 바로 열립니다. 로컬에서는 모듈 스크립트 때문에 정적 서버가 필요합니다.
+**claude.ai 아티팩트(구독)** — 게시된 아티팩트 링크를 claude.ai에 로그인한 상태로 엽니다. 첫 Claude 호출 때 "이 아티팩트가 Claude를 사용하도록 허용" 확인이 뜹니다. 다시 게시하려면 아래처럼 페이지를 만들고 Claude Code의 Artifact 도구로 `jaso/dist/artifact.html`을 `src/*.js`와 함께 올리면 됩니다(`capabilities: { sample: {}, downloads: true }`).
+
+```bash
+npm run build:artifact   # jaso/dist/artifact.html 생성 (index.html 본문 + style.css 인라인)
+```
+
+**GitHub Pages·로컬(API 키)** — `https://<user>.github.io/<repo>/jaso/`에서 바로 열립니다. 로컬에서는 모듈 스크립트 때문에 정적 서버가 필요합니다.
 
 ```bash
 npm run serve        # http://localhost:8080/jaso/
@@ -44,7 +58,8 @@ npm run serve        # http://localhost:8080/jaso/
 ```bash
 npm install
 npm test             # 단위 테스트 (node:test)
-npm run e2e          # Playwright E2E — 모의 Anthropic API로 전체 흐름 검증, 스크린샷은 .playwright/ (처음 실행 시 Chromium을 내려받습니다)
+npm run e2e          # Playwright E2E 2종 — API 키 모드(모의 Anthropic API), 아티팩트 모드(가짜 window.claude). 스크린샷은 .playwright/ (처음 실행 시 Chromium을 내려받습니다)
+npm run build:artifact  # claude.ai 아티팩트용 페이지 생성
 npm run vendor       # jaso/vendor/anthropic-sdk.mjs 재생성 (@anthropic-ai/sdk 브라우저 번들)
 ```
 
@@ -52,14 +67,18 @@ npm run vendor       # jaso/vendor/anthropic-sdk.mjs 재생성 (@anthropic-ai/sd
 
 ```
 jaso/
-├─ index.html          # 앱 셸, import map, 설정/프로젝트/경험 카드 대화상자
+├─ index.html          # 앱 셸(API 키 모드 진입점), import map, 대화상자
+├─ dist/artifact.html  # claude.ai 아티팩트용 본문(빌드 산출물)
 ├─ style.css
-├─ vendor/anthropic-sdk.mjs
+├─ vendor/anthropic-sdk.mjs   # API 키 모드에서만 동적 로드
 └─ src/
-   ├─ app.js           # UI 상태·렌더링·이벤트
-   ├─ agent.js         # 인터뷰 루프, 작성/첨삭/수정 파이프라인, 공고 분석, 면접 질문
+   ├─ app.js           # UI 상태·렌더링·이벤트, 실행 환경 감지
+   ├─ agent.js         # 인터뷰 상태 관리, 작성/첨삭/수정 파이프라인, 공고 분석, 면접 질문
+   ├─ llm-sample.js    # claude.ai 아티팩트 제공자(sample: 프롬프트 합성, JSON 턴 인터뷰)
+   ├─ llm-sdk.js       # Anthropic SDK 제공자(tool use 인터뷰 루프, 구조화 출력, 폴백)
+   ├─ interview.js / experiences.js / errors.js   # 공통 헬퍼
    ├─ prompts.js       # 시스템 프롬프트, 도구/출력 스키마, 메시지 빌더 (한국어)
-   ├─ api.js           # SDK 클라이언트, 모델 목록, 오류 문구, 비용 추정
+   ├─ api.js           # 모델 목록, 오류 문구, 비용 추정
    ├─ text.js          # 글자수 계산·판정, 스키마 검증 등 순수 함수
    ├─ presets.js       # 문항 템플릿·기업별 예시 세트
    └─ storage.js       # localStorage/sessionStorage
@@ -67,6 +86,6 @@ jaso/
 
 ### 비용·주의
 
-- 문항 하나를 완성하는 데 보통 API 호출 3~7회(초안 1, 첨삭 1~3, 수정 0~2, 글자수 조정 0~2)가 들며, 사이드바에 토큰·추정 비용이 누적 표시됩니다.
+- 문항 하나를 완성하는 데 보통 Claude 호출 3~7회(초안 1, 첨삭 1~3, 수정 0~2, 글자수 조정 0~2)가 듭니다. 아티팩트 모드에서는 보는 사람의 claude.ai 사용량이 쓰이고(한도에 걸리면 잠시 후 재시도), API 키 모드에서는 사이드바에 토큰·추정 비용이 누적 표시됩니다.
 - 기업별 문항 프리셋은 공개 자료를 정리한 **참고용**입니다. 문항 문구·글자수·공백 기준은 채용 회차마다 바뀌므로 반드시 실제 공고를 확인하세요.
 - AI가 만든 초안을 그대로 제출하기보다, 인터뷰에서 말한 자기 경험이 정확히 반영됐는지 확인하고 표현을 자기 말로 다듬는 것을 권합니다.

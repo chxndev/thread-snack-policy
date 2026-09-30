@@ -1,3 +1,5 @@
+<title>자소서 에이전트</title>
+<style>
 :root {
   --bg: #ffffff; --bg2: #f6f7f9; --panel: #ffffff; --ink: #16181d; --ink2: #4b5262; --ink3: #7b8394;
   --rule: #e2e5ec; --accent: #c2410c; --accent-ink: #ffffff; --accent-soft: rgba(194, 65, 12, .1);
@@ -220,3 +222,137 @@ footer.site { text-align: center; color: var(--ink3); font-size: .78rem; padding
 #confirm-dialog .dlg-body { padding: 1rem 1.1rem; }
 #confirm-dialog p { white-space: pre-wrap; }
 .runtime-badge { font-size: .72rem; color: var(--ink3); border: 1px solid var(--rule); border-radius: 999px; padding: .1rem .5rem; }
+
+</style>
+<header class="topbar">
+  <div class="brand"><span class="dot"></span>자소서 에이전트 <span class="runtime-badge" id="runtime-badge" hidden></span></div>
+  <nav class="steps" id="steps" aria-label="진행 단계"></nav>
+  <div class="topbar-actions">
+    <button class="btn sm" data-action="open-settings" id="btn-settings">설정</button>
+    <button class="btn sm" data-action="open-project-menu" id="btn-project">프로젝트 ▾</button>
+  </div>
+</header>
+
+<main class="layout">
+  <section class="stage" id="stage"></section>
+  <div id="status-live" class="sr-only" aria-live="polite"></div>
+  <aside class="side" id="side"></aside>
+</main>
+<footer class="site" id="site-footer">개인용 도구입니다. 입력한 내용은 이 브라우저에만 저장되며, Claude 호출 외에는 어디로도 전송되지 않습니다.</footer>
+
+<dialog id="settings-dialog">
+  <form method="dialog" class="dlg-body" id="settings-form">
+    <h2>설정</h2>
+    <div class="notice info small" data-mode="artifact" hidden>이 페이지는 claude.ai 안에서 실행 중이며, 보는 사람의 claude.ai 구독 사용량으로 Claude를 호출합니다. API 키가 필요 없습니다.</div>
+    <div data-mode="artifact" hidden>
+      <div class="field">
+        <label for="s-tier">작성 모델 등급</label>
+        <select id="s-tier" name="tier"></select>
+        <span class="hint">초안·수정에 쓰는 등급입니다. 인터뷰·첨삭·공고 분석은 표준 등급으로 실행합니다. 요금제에 따라 낮은 등급으로 대체될 수 있습니다.</span>
+      </div>
+    </div>
+    <div data-mode="api">
+    <div class="field">
+      <label for="s-apikey">Anthropic API 키</label>
+      <input type="password" id="s-apikey" name="apiKey" autocomplete="off" placeholder="sk-ant-...">
+      <label class="check"><input type="checkbox" name="persistKey" id="s-persist"> 이 브라우저에 저장(로그아웃해도 유지)</label>
+      <span class="hint">체크하지 않으면 탭을 닫을 때까지만 기억합니다. 공용 PC에서는 체크하지 마세요. 키는 <code>api.anthropic.com</code>으로만 전송됩니다.</span>
+    </div>
+    <div class="grid-2">
+      <div class="field">
+        <label for="s-model">모델</label>
+        <select id="s-model" name="model"></select>
+      </div>
+      <div class="field">
+        <label for="s-effort">작성 품질 (effort)</label>
+        <select id="s-effort" name="effort"></select>
+        <span class="hint">인터뷰·첨삭은 항상 표준(medium)으로 실행합니다.</span>
+      </div>
+    </div>
+    </div>
+    <div class="grid-2">
+      <div class="field">
+        <label for="s-subheading">소제목</label>
+        <select id="s-subheading" name="subheading">
+          <option value="auto">자동 판단 (700자 이상이면 사용)</option>
+          <option value="on">항상 사용</option>
+          <option value="off">사용하지 않음</option>
+        </select>
+      </div>
+      <div class="field">
+        <label for="s-maxrev">첨삭 반복 횟수</label>
+        <select id="s-maxrev" name="maxRevisions">
+          <option value="0">0 (초안 + 첨삭만)</option>
+          <option value="1">1</option>
+          <option value="2" selected>2 (권장)</option>
+          <option value="3">3</option>
+        </select>
+      </div>
+    </div>
+    <div data-mode="api">
+    <label class="check"><input type="checkbox" name="fallbacks" id="s-fallbacks" checked> 안전 분류기 거절 시 서버 폴백 모델로 자동 재시도</label>
+    <details style="margin:.7rem 0">
+      <summary class="small muted">고급: API Base URL (프록시 사용 시)</summary>
+      <div class="field" style="margin-top:.4rem">
+        <input type="url" id="s-baseurl" name="baseURL" placeholder="https://api.anthropic.com (비워 두면 기본값)">
+        <span class="hint">프록시를 쓰면 도구 입력 스트리밍(eager_input_streaming)은 자동으로 끕니다.</span>
+      </div>
+    </details>
+    </div>
+    <div class="section-title">이 프로젝트 사용량</div>
+    <div class="usage" id="s-usage"></div>
+    <div class="btn-row end" style="margin-top:1rem">
+      <button type="button" class="btn ghost danger" data-action="clear-key" data-mode="api">키 삭제</button>
+      <button type="button" class="btn" data-action="close-settings">취소</button>
+      <button type="submit" class="btn primary">저장</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="project-dialog">
+  <div class="dlg-body">
+    <h2>프로젝트</h2>
+    <p class="small muted">모든 내용은 이 브라우저(localStorage)에만 저장됩니다. 다른 기기로 옮기려면 JSON으로 내보내세요.</p>
+    <div class="btn-row" style="flex-direction:column;align-items:stretch">
+      <button class="btn" data-action="export-project">JSON으로 내보내기</button>
+      <label class="btn" style="justify-content:center">JSON 가져오기 <input type="file" id="import-file" accept="application/json" class="sr-only"></label>
+      <button class="btn danger" data-action="new-project">새 프로젝트 (현재 내용 삭제)</button>
+      <button class="btn ghost" data-action="close-project-menu">닫기</button>
+    </div>
+  </div>
+</dialog>
+
+<dialog id="exp-dialog">
+  <form method="dialog" class="dlg-body" id="exp-form">
+    <h2 id="exp-dialog-title">경험 카드</h2>
+    <input type="hidden" name="id">
+    <div class="field"><label for="exp-title">제목</label><input id="exp-title" type="text" name="title" required placeholder="예: 동아리 홍보 예산 40% 절감"></div>
+    <div class="field"><label for="exp-situation">상황 (언제·어디서·배경)</label><textarea id="exp-situation" name="situation" rows="2"></textarea></div>
+    <div class="field"><label for="exp-task">과제 (맡은 역할·어려움)</label><textarea id="exp-task" name="task" rows="2"></textarea></div>
+    <div class="field"><label for="exp-action">행동 (무엇을·어떻게·왜)</label><textarea id="exp-action" name="action" rows="3"></textarea></div>
+    <div class="field"><label for="exp-result">결과 (수치·변화·평가)</label><textarea id="exp-result" name="result" rows="2"></textarea></div>
+    <div class="field"><label for="exp-learned">배운 점</label><textarea id="exp-learned" name="learned" rows="2"></textarea></div>
+    <div class="grid-2">
+      <div class="field"><label for="exp-keywords">키워드 (쉼표로 구분)</label><input id="exp-keywords" type="text" name="keywords" placeholder="협상, 데이터 분석"></div>
+      <fieldset class="field" style="border:0;padding:0;margin:0 0 .8rem"><legend style="font-size:.85rem;color:var(--ink2);font-weight:600;padding:0">연관 문항</legend><div id="exp-qids" class="btn-row"></div></fieldset>
+    </div>
+    <div class="btn-row end">
+      <button type="button" class="btn" data-action="close-exp">취소</button>
+      <button type="submit" class="btn primary">저장</button>
+    </div>
+  </form>
+</dialog>
+
+<dialog id="confirm-dialog">
+  <div class="dlg-body">
+    <h2 id="confirm-title">확인</h2>
+    <p id="confirm-message"></p>
+    <div class="btn-row end">
+      <button type="button" class="btn" data-action="confirm-cancel">취소</button>
+      <button type="button" class="btn primary" id="confirm-ok" data-action="confirm-ok">확인</button>
+    </div>
+  </div>
+</dialog>
+
+<div id="toast" aria-live="assertive"></div>
+<script type="module" src="src/app.js"></script>

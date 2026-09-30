@@ -1,7 +1,8 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import Anthropic from '@anthropic-ai/sdk';
-import { costFromMessage, estimateCost, isToolJsonError, describeError } from '../jaso/src/api.js';
+import { costFromMessage, estimateCost, describeError } from '../jaso/src/api.js';
+import { createSdkClient } from '../jaso/src/llm-sdk.js';
 
 test('costFromMessage: 폴백 iterations가 있으면 시도별 모델 단가로 합산한다', () => {
   const msg = {
@@ -25,10 +26,14 @@ test('costFromMessage: 폴백 iterations가 있으면 시도별 모델 단가로
   assert.equal(estimateCost('nope', { input: 1, output: 1, cacheRead: 0, cacheWrite: 0 }), null);
 });
 
-test('isToolJsonError는 SDK의 도구 입력 파싱 오류만 잡는다', () => {
-  assert.equal(isToolJsonError(new Anthropic.AnthropicError('Unable to parse tool parameter JSON from model. x')), true);
-  assert.equal(isToolJsonError(new Anthropic.AnthropicError('other')), false);
-  assert.equal(isToolJsonError(new TypeError('Unable to parse tool parameter JSON')), false);
+test('SDK 핸들의 isToolJsonError는 도구 입력 파싱 오류만 잡고, describeError는 인증 오류를 설명한다', async () => {
+  const h = await createSdkClient({ apiKey: 'sk-test' });
+  assert.equal(h.isToolJsonError(new Anthropic.AnthropicError('Unable to parse tool parameter JSON from model. x')), true);
+  assert.equal(h.isToolJsonError(new Anthropic.AnthropicError('other')), false);
+  assert.equal(h.isToolJsonError(new TypeError('Unable to parse tool parameter JSON')), false);
+  const authErr = new Anthropic.AuthenticationError(401, { error: { message: 'bad key' } }, 'bad key', new Headers());
+  assert.match(describeError(authErr, h.describeError), /API 키가 올바르지 않습니다/);
+  assert.equal(describeError({ name: 'AgentError', message: '멈춤' }, h.describeError), '멈춤');
 });
 
 test('describeError는 AgentError 메시지를 그대로 쓴다', () => {

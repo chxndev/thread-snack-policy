@@ -651,3 +651,35 @@ export function buildSelectionEditRequest(project, question, text, selection, in
     '위 "수정할 구간"만 사용자 요청대로 고치고, 나머지 부분은 글자 하나 바꾸지 말고 그대로 두어 답변 전체를 출력하세요. 전체 글자수 제한을 넘기지 마세요. 본문만 출력하세요.',
   ].join('\n');
 }
+
+// ───────────────────────────── claude.ai(sample) 제공자용 인터뷰 응답 형식 ─────────────────────────────
+
+/** 도구 호출을 쓸 수 없는 환경에서 인터뷰어가 매 턴 돌려주는 JSON */
+export const INTERVIEW_REPLY_SCHEMA = {
+  type: 'object',
+  additionalProperties: false,
+  required: ['saved', 'question', 'finish'],
+  properties: {
+    saved: { type: 'array', items: INTERVIEW_TOOLS[1].input_schema },
+    question: { type: ['object', 'null'], additionalProperties: false, required: ['question', 'why', 'example'], properties: INTERVIEW_TOOLS[0].input_schema.properties },
+    finish: { type: ['object', 'null'], additionalProperties: false, required: ['summary', 'writer_notes'], properties: INTERVIEW_TOOLS[2].input_schema.properties },
+  },
+};
+
+export const INTERVIEW_JSON_FORMAT = `[응답 형식 — 이 환경에서는 도구 대신 JSON으로 소통합니다]
+매 턴 아래 형태의 JSON 하나만 출력합니다(설명·인사·코드펜스 없이). ask_user → "question", save_experience → "saved", finish_interview → "finish"에 해당합니다.
+{"saved":[{"id":"","title":"한 줄 제목","situation":"","task":"","action":"","result":"","learned":"","keywords":["역량 키워드"],"question_ids":["q1"]}],
+ "question":{"question":"지원자에게 보여 줄 질문","why":"왜 묻는지 한 줄","example":"답변 힌트(없으면 빈 문자열)"},
+ "finish":null}
+- saved: 이번 턴에 저장하거나 갱신할 경험 카드 목록. 없으면 빈 배열. 새 카드는 id를 빈 문자열로 두고, 갱신은 저장 시 받은 id(예: exp_abc123)를 씁니다. 지원자가 말하지 않은 항목은 빈 문자열로 둡니다.
+- question과 finish 중 정확히 하나만 채우고 다른 하나는 null로 둡니다. 인터뷰를 끝낼 때는 "finish":{"summary":"지원자 프로필 요약 3~5문장","writer_notes":"작성 단계에 넘길 메모"}로 씁니다.`;
+
+/** 시스템 프롬프트를 쓸 수 없는 환경용: 역할 지시와 요청을 한 프롬프트로 합친다 */
+export function composePrompt(system, user) {
+  return `[역할과 규칙]\n${system}\n\n[요청]\n${user}`;
+}
+
+/** JSON 출력 지시(스키마 포함) */
+export function jsonFormatInstruction(schema) {
+  return `\n\n[출력 형식]\n다음 JSON 스키마를 만족하는 JSON 값 하나만 출력하세요. 설명이나 코드펜스 없이 JSON만 씁니다.\n${JSON.stringify(schema)}`;
+}
