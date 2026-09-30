@@ -2,6 +2,7 @@
   --bg: #ffffff; --bg2: #f6f7f9; --panel: #ffffff; --ink: #16181d; --ink2: #4b5262; --ink3: #7b8394;
   --rule: #e2e5ec; --accent: #c2410c; --accent-ink: #ffffff; --accent-soft: rgba(194, 65, 12, .1);
   --ok: #1a7f4b; --warn: #b45309; --bad: #b91c1c; --ok-soft: rgba(26,127,75,.12); --warn-soft: rgba(180,83,9,.12); --bad-soft: rgba(185,28,28,.12);
+  --on-status: #ffffff;
   --shadow: 0 1px 2px rgba(0,0,0,.06), 0 4px 16px rgba(0,0,0,.05);
   --radius: 10px;
 }
@@ -10,6 +11,7 @@
     --bg: #0f1116; --bg2: #151821; --panel: #171a22; --ink: #e9ecf2; --ink2: #aab2c2; --ink3: #7f8798;
     --rule: #272c37; --accent: #f4823f; --accent-ink: #16181d; --accent-soft: rgba(244,130,63,.14);
     --ok: #4ade80; --warn: #fbbf24; --bad: #f87171; --ok-soft: rgba(74,222,128,.12); --warn-soft: rgba(251,191,36,.12); --bad-soft: rgba(248,113,113,.12);
+    --on-status: #0f1116;
     --shadow: 0 1px 2px rgba(0,0,0,.4), 0 4px 16px rgba(0,0,0,.35);
   }
 }
@@ -192,8 +194,8 @@ dialog h2 { font-size: 1.1rem; margin-bottom: .6rem; }
 .notice.bad { background: var(--bad-soft); }
 #toast { position: fixed; left: 50%; bottom: 1.2rem; transform: translateX(-50%); z-index: 50; display: flex; flex-direction: column; gap: .4rem; align-items: center; pointer-events: none; }
 .toast { background: var(--ink); color: var(--bg); padding: .55rem .9rem; border-radius: 8px; font-size: .88rem; box-shadow: var(--shadow); max-width: 90vw; }
-.toast.bad { background: var(--bad); color: #fff; }
-.toast.ok { background: var(--ok); color: #fff; }
+.toast.bad { background: var(--bad); color: var(--on-status); }
+.toast.ok { background: var(--ok); color: var(--on-status); }
 
 /* ── 완성 ── */
 .final { white-space: pre-wrap; line-height: 1.8; border: 1px solid var(--rule); border-radius: 8px; padding: .8rem .9rem; background: var(--bg); }

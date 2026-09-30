@@ -23,7 +23,8 @@
 </header>
 
 <main class="layout">
-  <section class="stage" id="stage" aria-live="polite"></section>
+  <section class="stage" id="stage"></section>
+  <div id="status-live" class="sr-only" aria-live="polite"></div>
   <aside class="side" id="side"></aside>
 </main>
 <footer class="site">개인용 도구입니다. API 키는 이 브라우저에서 Anthropic API로 직접 전송되며, 이 사이트의 서버로는 아무것도 보내지 않습니다.</footer>
@@ -100,15 +101,15 @@
   <form method="dialog" class="dlg-body" id="exp-form">
     <h2 id="exp-dialog-title">경험 카드</h2>
     <input type="hidden" name="id">
-    <div class="field"><label>제목</label><input type="text" name="title" required placeholder="예: 동아리 홍보 예산 40% 절감"></div>
-    <div class="field"><label>상황 (언제·어디서·배경)</label><textarea name="situation" rows="2"></textarea></div>
-    <div class="field"><label>과제 (맡은 역할·어려움)</label><textarea name="task" rows="2"></textarea></div>
-    <div class="field"><label>행동 (무엇을·어떻게·왜)</label><textarea name="action" rows="3"></textarea></div>
-    <div class="field"><label>결과 (수치·변화·평가)</label><textarea name="result" rows="2"></textarea></div>
-    <div class="field"><label>배운 점</label><textarea name="learned" rows="2"></textarea></div>
+    <div class="field"><label for="exp-title">제목</label><input id="exp-title" type="text" name="title" required placeholder="예: 동아리 홍보 예산 40% 절감"></div>
+    <div class="field"><label for="exp-situation">상황 (언제·어디서·배경)</label><textarea id="exp-situation" name="situation" rows="2"></textarea></div>
+    <div class="field"><label for="exp-task">과제 (맡은 역할·어려움)</label><textarea id="exp-task" name="task" rows="2"></textarea></div>
+    <div class="field"><label for="exp-action">행동 (무엇을·어떻게·왜)</label><textarea id="exp-action" name="action" rows="3"></textarea></div>
+    <div class="field"><label for="exp-result">결과 (수치·변화·평가)</label><textarea id="exp-result" name="result" rows="2"></textarea></div>
+    <div class="field"><label for="exp-learned">배운 점</label><textarea id="exp-learned" name="learned" rows="2"></textarea></div>
     <div class="grid-2">
-      <div class="field"><label>키워드 (쉼표로 구분)</label><input type="text" name="keywords" placeholder="협상, 데이터 분석"></div>
-      <div class="field"><label>연관 문항</label><div id="exp-qids" class="btn-row"></div></div>
+      <div class="field"><label for="exp-keywords">키워드 (쉼표로 구분)</label><input id="exp-keywords" type="text" name="keywords" placeholder="협상, 데이터 분석"></div>
+      <fieldset class="field" style="border:0;padding:0;margin:0 0 .8rem"><legend style="font-size:.85rem;color:var(--ink2);font-weight:600;padding:0">연관 문항</legend><div id="exp-qids" class="btn-row"></div></fieldset>
     </div>
     <div class="btn-row end">
       <button type="button" class="btn" data-action="close-exp">취소</button>

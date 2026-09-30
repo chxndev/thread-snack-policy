@@ -3,16 +3,27 @@ const PROJECT_KEY = 'jaso.project.v1';
 const SETTINGS_KEY = 'jaso.settings.v1';
 const KEY_KEY = 'jaso.apiKey.v1';
 
-function read(store, key) {
+// 저장소 접근이 차단된 환경(쿠키 차단, 샌드박스 iframe)에서는 전역 접근 자체가 throw 하므로 try 안에서 얻는다
+function getStore(kind) {
   try {
-    const raw = store.getItem(key);
+    return kind === 'session' ? window.sessionStorage : window.localStorage;
+  } catch {
+    return null;
+  }
+}
+function read(kind, key) {
+  try {
+    const store = getStore(kind);
+    const raw = store?.getItem(key);
     return raw ? JSON.parse(raw) : null;
   } catch {
     return null;
   }
 }
-function write(store, key, value) {
+function write(kind, key, value) {
   try {
+    const store = getStore(kind);
+    if (!store) return false;
     if (value === null || value === undefined) store.removeItem(key);
     else store.setItem(key, JSON.stringify(value));
     return true;
@@ -22,20 +33,23 @@ function write(store, key, value) {
 }
 
 export const storage = {
-  loadProject: () => read(localStorage, PROJECT_KEY),
-  saveProject: (p) => write(localStorage, PROJECT_KEY, p),
-  clearProject: () => write(localStorage, PROJECT_KEY, null),
-  loadSettings: () => read(localStorage, SETTINGS_KEY) ?? {},
-  saveSettings: (s) => write(localStorage, SETTINGS_KEY, s),
+  loadProject: () => read('local', PROJECT_KEY),
+  saveProject: (p) => write('local', PROJECT_KEY, p),
+  clearProject: () => write('local', PROJECT_KEY, null),
+  loadSettings: () => read('local', SETTINGS_KEY) ?? {},
+  saveSettings: (s) => write('local', SETTINGS_KEY, s),
   loadApiKey() {
-    return read(sessionStorage, KEY_KEY) ?? read(localStorage, KEY_KEY) ?? '';
+    return read('session', KEY_KEY) ?? read('local', KEY_KEY) ?? '';
+  },
+  hasPersistedApiKey() {
+    return !!read('local', KEY_KEY);
   },
   saveApiKey(key, persist) {
-    write(sessionStorage, KEY_KEY, key || null);
-    write(localStorage, KEY_KEY, persist && key ? key : null);
+    write('session', KEY_KEY, key || null);
+    write('local', KEY_KEY, persist && key ? key : null);
   },
   clearApiKey() {
-    write(sessionStorage, KEY_KEY, null);
-    write(localStorage, KEY_KEY, null);
+    write('session', KEY_KEY, null);
+    write('local', KEY_KEY, null);
   },
 };

@@ -2,7 +2,8 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import {
   buildInterviewOpening, buildDraftRequest, buildCritiqueRequest, buildLengthFixRequest, buildSelectionEditRequest,
-  formatProfile, INTERVIEW_TOOLS, CRITIQUE_SCHEMA, JD_SCHEMA, INTERVIEW_PREP_SCHEMA, computeTotal,
+  buildReviseRequest, buildEditRequest, interviewBudget,
+  formatProfile, INTERVIEW_TOOLS, CRITIQUE_SCHEMA, JD_SCHEMA, INTERVIEW_PREP_SCHEMA, computeTotal, JD_ANALYST_SYSTEM,
 } from '../jaso/src/prompts.js';
 import { validateSchema } from '../jaso/src/text.js';
 import { sampleProject } from './helpers/fake-client.js';
@@ -49,18 +50,54 @@ test('초안 요청에 목표 글자수·연관 카드 표시·다른 문항 답
   assert.match(s, /이미 쓴 글/);
 });
 
-test('글자수 조정 요청은 초과·부족 방향을 정확히 지시한다', () => {
+test('글자수 조정 요청은 초과·부족 방향을 정확히 지시하고 지원 정보(블라인드 포함)를 싣는다', () => {
   const p = sampleProject();
+  p.profile.blind = true;
   const q = p.questions[0]; // 500자
   assert.match(buildLengthFixRequest(p, q, '가'.repeat(560)), /80자 이상 줄여서 450~480자/);
   assert.match(buildLengthFixRequest(p, q, '가'.repeat(400)), /50자 이상 늘려서 450~480자/);
+  assert.match(buildLengthFixRequest(p, q, '가'.repeat(400)), /블라인드 채용/);
+  assert.match(buildSelectionEditRequest(p, q, '첫 문장. 둘째 문장.', '둘째 문장.', 'x'), /블라인드 채용/);
 });
 
-test('첨삭 요청에 글자수 판정이 들어가고 must_fix에 글자수를 넣지 말라고 지시한다', () => {
+test('첨삭 요청에 글자수 판정·문항 유형·소제목 정책이 들어간다', () => {
   const p = sampleProject();
-  const s = buildCritiqueRequest(p, p.questions[0], '가'.repeat(520));
+  const s = buildCritiqueRequest(p, p.questions[0], '가'.repeat(520), { subheading: 'on' });
   assert.match(s, /20자 초과/);
   assert.match(s, /must_fix에 넣지 말고/);
+  assert.match(s, /문항 유형: 지원동기/);
+  assert.match(s, /삭제 권고 금지/);
+  assert.match(buildCritiqueRequest(p, p.questions[0], '본문', { subheading: 'off' }), /소제목 제거/);
+});
+
+test('수정 요청에 다른 문항 답변·인터뷰 요약이 들어가고 글자수 문구가 한 기준으로 통일된다', () => {
+  const p = sampleProject();
+  p.interview.summary = '요약입니다';
+  const crit = { summary: 's', total: 70, must_fix: ['x'], issues: [], strengths: [] };
+  const s = buildReviseRequest(p, p.questions[1], '가'.repeat(985), crit, { subheading: 'on', otherAnswers: [{ id: 'q1', questionText: '지원 동기', text: '다른 답변' }] });
+  assert.match(s, /다른 답변/);
+  assert.match(s, /\[인터뷰 요약\]\n요약입니다/);
+  assert.match(s, /목표 900~960자/);
+  assert.match(s, /현재 글자수: 985자 \/ 제한 1000자 \(공백 포함\) — 범위 내\(상한에 가까움/);
+  assert.ok(!/목표 900~1000자/.test(s), '판정용 범위(90~100%)가 섞이지 않음');
+});
+
+test('편집 요청은 상한만 강제하고, 공백 제외 모드는 줄바꿈 미포함으로 안내한다', () => {
+  const p = sampleProject();
+  const s = buildEditRequest(p, p.questions[0], '본문', '더 간결하게');
+  assert.match(s, /절대 500자를 넘기지 마세요/);
+  assert.match(s, /분량을 줄이는 것이 아니라면 450자 이상/);
+  const q = { ...p.questions[0], mode: 'without' };
+  assert.match(buildDraftRequest(p, q), /공백·줄바꿈은 세지 않고/);
+  const noLimit = { ...p.questions[0], limit: 0 };
+  assert.match(buildDraftRequest(p, noLimit, { subheading: 'auto' }), /제한 없음 → 800~1000자/);
+});
+
+test('인터뷰 질문 예산은 문항 수에 비례한다', () => {
+  assert.equal(interviewBudget([]), 6);
+  assert.equal(interviewBudget(new Array(4)), 10);
+  assert.equal(interviewBudget(new Array(12)), 20);
+  assert.match(buildInterviewOpening(sampleProject()), /질문 예산: 약 6개/);
 });
 
 test('부분 수정 요청은 선택 구간과 요청을 포함한다', () => {
@@ -86,4 +123,9 @@ test('블라인드 채용·회사 정보 입력이 프로필에 반영된다', (
   const s = formatProfile({ company: 'LH', role: '사무', level: 'new', jobPosting: '', background: '', companyFacts: '3기 신도시 사업', notes: '', jdSummary: null, blind: true });
   assert.match(s, /3기 신도시 사업/);
   assert.match(s, /블라인드 채용: 출신 학교명/);
+});
+
+test('JD 분석가 프롬프트가 type/mode 값을 설명한다', () => {
+  assert.match(JD_ANALYST_SYSTEM, /motivation=지원동기/);
+  assert.match(JD_ANALYST_SYSTEM, /bytes2=바이트/);
 });

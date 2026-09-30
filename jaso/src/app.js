@@ -1,10 +1,10 @@
 // 자소서 에이전트 UI 컨트롤러 (프레임워크 없이 상태 → HTML 렌더링)
-import { createClient, MODELS, EFFORTS, describeError, estimateCost, isApiError } from './api.js';
+import { createClient, MODELS, EFFORTS, describeError, costFromMessage, isApiError, isToolJsonError } from './api.js';
 import { createAgent, DEFAULT_SETTINGS, emptyInterview, ensureAnswer, currentText, currentVersion, upsertExperience, addVersion } from './agent.js';
 import { storage } from './storage.js';
 import { COMMON_QUESTIONS, COMPANY_PRESETS } from './presets.js';
-import { QUESTION_TYPES, EDIT_PRESETS, SCORE_LABELS, INTERVIEW_SKIP_ANSWER } from './prompts.js';
-import { COUNT_MODES, judgeLength, countBy, uid } from './text.js';
+import { QUESTION_TYPES, EDIT_PRESETS, SCORE_LABELS, INTERVIEW_SKIP_ANSWER, CRITIQUE_SCHEMA, computeTotal } from './prompts.js';
+import { COUNT_MODES, judgeLength, countBy, uid, validateSchema } from './text.js';
 
 // ───────────────────────────── 상태 ─────────────────────────────
 
@@ -25,39 +25,89 @@ function newProject() {
 
 const SAFE_ID = /^[A-Za-z0-9_-]{1,40}$/;
 const safeId = (prefix, id) => (typeof id === 'string' && SAFE_ID.test(id) ? id : uid(prefix));
+const str = (v) => (typeof v === 'string' ? v : v == null ? '' : String(v));
+const strArr = (v) => (Array.isArray(v) ? v.filter((x) => typeof x === 'string') : []);
+
+/** 가져온 첨삭 결과는 스키마 검증을 통과할 때만 유지한다(렌더링에 그대로 쓰이므로) */
+function normalizeCritique(c) {
+  if (!c || typeof c !== 'object') return null;
+  const clean = {
+    scores: c.scores && typeof c.scores === 'object' ? c.scores : {},
+    total: Number(c.total) || 0,
+    needs_revision: !!c.needs_revision,
+    must_fix: strArr(c.must_fix),
+    issues: Array.isArray(c.issues) ? c.issues.filter((i) => i && typeof i === 'object').map((i) => ({ quote: str(i.quote), why: str(i.why), fix: str(i.fix), severity: ['high', 'medium', 'low'].includes(i.severity) ? i.severity : 'low' })) : [],
+    strengths: strArr(c.strengths),
+    summary: str(c.summary),
+  };
+  if (validateSchema(clean, CRITIQUE_SCHEMA).length) return null;
+  clean.total = computeTotal(clean.scores);
+  if (c.length && typeof c.length === 'object') clean.length = c.length;
+  return clean;
+}
 
 function normalizeProject(p) {
   const base = newProject();
   if (!p || typeof p !== 'object') return base;
-  const out = { ...base, ...p };
-  out.profile = { ...base.profile, ...(p.profile ?? {}) };
-  // 문항 id는 q<번호> 형식만 허용. 바뀐 id는 답변·경험 카드에도 반영한다.
+  const out = { ...base, id: safeId('p', p.id), createdAt: Number(p.createdAt) || Date.now(), updatedAt: Number(p.updatedAt) || undefined };
+  const prof = p.profile && typeof p.profile === 'object' ? p.profile : {};
+  out.profile = {
+    company: str(prof.company), role: str(prof.role), level: prof.level === 'exp' ? 'exp' : 'new',
+    jobPosting: str(prof.jobPosting), background: str(prof.background), companyFacts: str(prof.companyFacts), notes: str(prof.notes),
+    blind: !!prof.blind,
+    jdSummary: prof.jdSummary && typeof prof.jdSummary === 'object'
+      ? { competencies: strArr(prof.jdSummary.competencies), talent: str(prof.jdSummary.talent), notes: str(prof.jdSummary.notes) }
+      : null,
+  };
+  // 문항 id는 q<번호> 형식만 허용하고 중복을 피한다. 바뀐 id는 답변·경험 카드에도 반영한다.
   const idMap = {};
-  out.questions = (Array.isArray(p.questions) ? p.questions : []).filter((q) => q && typeof q === 'object').map((q, i) => {
-    const id = typeof q.id === 'string' && /^q\d{1,4}$/.test(q.id) ? q.id : `q${i + 1}`;
-    idMap[q.id] = id;
-    return { id, text: String(q.text ?? ''), limit: Math.max(0, Number(q.limit) || 0), mode: q.mode in COUNT_MODES ? q.mode : 'with', type: typeof q.type === 'string' ? q.type : 'competency' };
+  const used = new Set();
+  const rawQuestions = (Array.isArray(p.questions) ? p.questions : []).filter((q) => q && typeof q === 'object');
+  let maxNum = rawQuestions.reduce((m, q) => (typeof q.id === 'string' && /^q\d{1,4}$/.test(q.id) ? Math.max(m, Number(q.id.slice(1))) : m), 0);
+  out.questions = rawQuestions.map((q) => {
+    let id = typeof q.id === 'string' && /^q\d{1,4}$/.test(q.id) && !used.has(q.id) ? q.id : `q${++maxNum}`;
+    used.add(id);
+    if (typeof q.id === 'string') idMap[q.id] = id;
+    return { id, text: str(q.text), limit: Math.max(0, Number(q.limit) || 0), mode: Object.hasOwn(COUNT_MODES, q.mode) ? q.mode : 'with', type: QUESTION_TYPES.some((t) => t.id === q.type) ? q.type : 'competency' };
   });
+  const remapQ = (x) => idMap[x] ?? x;
   out.experiences = (Array.isArray(p.experiences) ? p.experiences : []).filter((e) => e && typeof e === 'object').map((e) => ({
-    ...e, id: safeId('exp', e.id),
-    keywords: Array.isArray(e.keywords) ? e.keywords.map(String) : [],
-    questionIds: Array.isArray(e.questionIds) ? e.questionIds.map((x) => idMap[x] ?? x).filter((x) => out.questions.some((q) => q.id === x)) : [],
+    id: safeId('exp', e.id),
+    title: str(e.title), situation: str(e.situation), task: str(e.task), action: str(e.action), result: str(e.result), learned: str(e.learned),
+    keywords: strArr(e.keywords),
+    questionIds: strArr(e.questionIds).map(remapQ).filter((x) => out.questions.some((q) => q.id === x)),
+    source: e.source === 'manual' ? 'manual' : 'interview',
+    createdAt: Number(e.createdAt) || Date.now(), updatedAt: Number(e.updatedAt) || Date.now(),
   }));
-  out.interview = { ...emptyInterview(), ...(p.interview ?? {}) };
-  if (!Array.isArray(out.interview.messages)) out.interview.messages = [];
-  if (!Array.isArray(out.interview.transcript)) out.interview.transcript = [];
-  if (out.interview.status === 'running') out.interview.status = out.interview.pending ? 'waiting' : 'idle';
+  const iv = p.interview && typeof p.interview === 'object' ? p.interview : {};
+  out.interview = {
+    ...emptyInterview(),
+    status: ['idle', 'waiting', 'done'].includes(iv.status) ? iv.status : iv.status === 'running' ? (iv.pending ? 'waiting' : 'idle') : 'idle',
+    messages: Array.isArray(iv.messages) ? iv.messages.filter((m) => m && (m.role === 'user' || m.role === 'assistant') && (typeof m.content === 'string' || Array.isArray(m.content))) : [],
+    transcript: Array.isArray(iv.transcript) ? iv.transcript.filter((t) => t && typeof t === 'object').map((t) => ({ role: t.role === 'user' ? 'user' : 'agent', kind: str(t.kind) || 'question', text: str(t.text), why: str(t.why), example: str(t.example) })) : [],
+    pending: iv.pending && typeof iv.pending === 'object' && typeof iv.pending.question === 'string'
+      ? { toolUseId: typeof iv.pending.toolUseId === 'string' ? iv.pending.toolUseId : null, results: Array.isArray(iv.pending.results) ? iv.pending.results : [], question: iv.pending.question, why: str(iv.pending.why), example: str(iv.pending.example) }
+      : null,
+    summary: str(iv.summary), writerNotes: str(iv.writerNotes), questionCount: Number(iv.questionCount) || 0,
+  };
+  if (out.interview.status === 'waiting' && !out.interview.pending && !out.interview.messages.length) out.interview.status = 'idle';
   out.answers = {};
   if (p.answers && typeof p.answers === 'object') {
     for (const [k, a] of Object.entries(p.answers)) {
-      const id = idMap[k] ?? k;
+      const id = remapQ(k);
       if (!out.questions.some((q) => q.id === id) || !a || typeof a !== 'object') continue;
-      const versions = (Array.isArray(a.versions) ? a.versions : []).filter((v) => v && typeof v.text === 'string').map((v) => ({ ...v, id: safeId('v', v.id), label: String(v.label ?? '버전') }));
+      const versions = (Array.isArray(a.versions) ? a.versions : []).filter((v) => v && typeof v.text === 'string').map((v) => ({
+        id: safeId('v', v.id), label: str(v.label) || '버전', text: v.text, createdAt: Number(v.createdAt) || Date.now(), critique: normalizeCritique(v.critique),
+      }));
       out.answers[id] = { versions, currentVersionId: versions.some((v) => v.id === a.currentVersionId) ? a.currentVersionId : versions.at(-1)?.id ?? null, status: versions.length ? 'done' : 'idle', error: '' };
     }
   }
-  out.usage = { ...base.usage, ...(p.usage ?? {}) };
-  if (!['setup', 'interview', 'write', 'done'].includes(out.step)) out.step = 'setup';
+  out.prep = p.prep && typeof p.prep === 'object' && Array.isArray(p.prep.questions)
+    ? { questions: p.prep.questions.filter((q) => q && typeof q === 'object').map((q) => ({ question: str(q.question), intent: str(q.intent), strategy: str(q.strategy), based_on: str(q.based_on) })) }
+    : null;
+  const u = p.usage && typeof p.usage === 'object' ? p.usage : {};
+  out.usage = { input: Number(u.input) || 0, output: Number(u.output) || 0, cacheRead: Number(u.cacheRead) || 0, cacheWrite: Number(u.cacheWrite) || 0, calls: Number(u.calls) || 0, costUsd: Number(u.costUsd) || 0 };
+  out.step = ['setup', 'interview', 'write', 'done'].includes(p.step) ? p.step : 'setup';
   return out;
 }
 
@@ -65,7 +115,7 @@ const state = {
   project: normalizeProject(storage.loadProject()),
   settings: { ...DEFAULT_SETTINGS, ...storage.loadSettings() },
   apiKey: storage.loadApiKey(),
-  persistKey: (() => { try { return !!localStorage.getItem('jaso.apiKey.v1'); } catch { return false; } })(),
+  persistKey: storage.hasPersistedApiKey(),
   ui: { busy: null, abort: null, questionStream: '', stageLog: {}, streamingId: null },
 };
 
@@ -94,16 +144,13 @@ function getAgent() {
     client,
     settings: state.settings,
     isApiError,
-    onUsage: ({ model, usage }) => {
+    isToolJsonError,
+    onUsage: ({ message }) => {
       const u = state.project.usage;
-      const one = {
-        input: usage?.input_tokens ?? 0,
-        output: usage?.output_tokens ?? 0,
-        cacheRead: usage?.cache_read_input_tokens ?? 0,
-        cacheWrite: usage?.cache_creation_input_tokens ?? 0,
-      };
-      u.input += one.input; u.output += one.output; u.cacheRead += one.cacheRead; u.cacheWrite += one.cacheWrite; u.calls += 1;
-      u.costUsd += estimateCost(model, one) ?? estimateCost(state.settings.model, one) ?? 0;
+      const c = costFromMessage(message, state.settings.model);
+      u.input += c.tokens.input; u.output += c.tokens.output; u.cacheRead += c.tokens.cacheRead; u.cacheWrite += c.tokens.cacheWrite; u.calls += 1;
+      u.costUsd += c.usd;
+      if (c.fallbackRan) toast(`안전 분류기 거절로 폴백 모델(${message.model})이 응답했습니다.`);
       renderSide();
     },
   });
@@ -141,6 +188,16 @@ function addQuestion(tpl = {}) {
 }
 
 function hasApiKey() { return !!state.apiKey; }
+
+/** 문항 세트를 통째로 바꿀 때: 답변·문항 연관·인터뷰어 메모는 옛 문항 id에 묶여 있으므로 정리한다 */
+function replaceQuestions() {
+  const p = state.project;
+  p.questions = [];
+  p.answers = {};
+  p.prep = null;
+  for (const e of p.experiences) e.questionIds = [];
+  p.interview.writerNotes = '';
+}
 
 // ───────────────────────────── 렌더링 ─────────────────────────────
 
@@ -189,13 +246,20 @@ function renderStage() {
     const chat = $('#chat');
     if (chat) chat.scrollTop = chat.scrollHeight;
     const ta = $('#iv-answer');
-    if (ta && !state.ui.busy) ta.focus();
+    const active = document.activeElement;
+    if (ta && !state.ui.busy && (!active || active === document.body || active.id === 'iv-answer')) ta.focus();
   }
+  const live = $('#status-live');
+  if (live) live.textContent = state.ui.busy ? busyLabel() : '';
 }
 
 function keyNotice() {
   if (hasApiKey()) return '';
   return `<div class="notice">아직 API 키가 없습니다. <button class="btn sm" data-action="open-settings">설정에서 키 입력</button> — Anthropic Console에서 발급한 키를 사용하며, 요청은 이 브라우저에서 직접 전송됩니다.</div>`;
+}
+
+function qSummary(q) {
+  return `${esc(COUNT_MODES[q.mode]?.label ?? '')} ${q.limit ? q.limit + (q.mode === 'bytes2' ? 'byte' : '자') : '제한 없음'}`;
 }
 
 function renderSetup() {
@@ -255,7 +319,7 @@ function renderSetup() {
     ${questions.length ? '' : '<div class="empty">문항이 없습니다. 위 메뉴에서 추가하거나 공고를 분석하세요.</div>'}
     ${questions.map((q) => `
       <div class="q-row" data-qid="${q.id}">
-        <div class="q-top"><span class="q-id">${q.id}</span><span class="muted small">${esc(COUNT_MODES[q.mode]?.label ?? '')} ${q.limit ? q.limit + (q.mode === 'bytes2' ? 'byte' : '자') : '제한 없음'}</span><span style="flex:1"></span><button class="btn sm ghost danger" data-action="q-remove" data-id="${q.id}">삭제</button></div>
+        <div class="q-top"><span class="q-id">${q.id}</span><span class="muted small q-summary">${qSummary(q)}</span><span style="flex:1"></span><button class="btn sm ghost danger" data-action="q-remove" data-id="${q.id}">삭제</button></div>
         <textarea data-qbind="text" data-id="${q.id}" rows="2" placeholder="문항 문구">${esc(q.text)}</textarea>
         <div class="q-meta">
           <input type="number" min="0" step="50" class="input" data-qbind="limit" data-id="${q.id}" value="${q.limit ?? 0}" placeholder="글자수 제한 (0=없음)" title="글자수 제한">
@@ -348,7 +412,7 @@ function critiqueHtml(c) {
   const dots = (n) => `<span class="dots">${[1, 2, 3, 4, 5].map((i) => `<span class="${i <= n ? 'on' : ''}">●</span>`).join('')}</span>`;
   return `
   <div class="critique">
-    <div class="card-head" style="margin-bottom:.2rem"><div><div class="total">${c.total}<span class="small muted">/100</span></div><div class="small muted">${esc(c.summary)}</div></div>${c.needs_revision ? '<span class="pill warn">재작성 권장</span>' : '<span class="pill ok">통과</span>'}</div>
+    <div class="card-head" style="margin-bottom:.2rem"><div><div class="total">${Number(c.total) || 0}<span class="small muted">/100</span></div><div class="small muted">${esc(c.summary)}</div></div>${c.needs_revision ? '<span class="pill warn">재작성 권장</span>' : '<span class="pill ok">통과</span>'}</div>
     <div class="scores">${Object.entries(SCORE_LABELS).map(([k, label]) => `<div class="score"><span>${label}</span>${dots(c.scores?.[k] ?? 0)}</div>`).join('')}</div>
     ${c.must_fix?.length ? `<div class="section-title">반드시 수정</div>${c.must_fix.map((m) => `<div class="issue high">${esc(m)}</div>`).join('')}` : ''}
     ${c.issues?.length ? `<div class="section-title">문제 지점</div>${c.issues.map((i) => `<div class="issue ${esc(i.severity)}"><q>${esc(i.quote)}</q> — ${esc(i.why)}<div class="fix">→ ${esc(i.fix)}</div></div>`).join('')}` : ''}
@@ -393,7 +457,7 @@ function renderAnswerCard(q) {
       </div>
     </div>
     <div class="body">
-      ${ans?.versions?.length > 1 ? `<div class="versions"><span class="tiny muted">버전:</span>${ans.versions.map((x) => `<button class="v ${x.id === v?.id ? 'current' : ''}" data-action="version-select" data-id="${q.id}" data-vid="${x.id}" title="${x.critique ? `첨삭 ${x.critique.total}점` : ''}">${esc(x.label)}</button>`).join('')}</div>` : ''}
+      ${ans?.versions?.length > 1 ? `<div class="versions"><span class="tiny muted">버전:</span>${ans.versions.map((x) => `<button class="v ${x.id === v?.id ? 'current' : ''}" data-action="version-select" data-id="${q.id}" data-vid="${x.id}" title="${x.critique ? `첨삭 ${Number(x.critique.total) || 0}점` : ''}">${esc(x.label)}</button>`).join('')}</div>` : ''}
       <textarea class="answer-text ${state.ui.streamingId === q.id ? 'streaming' : ''}" data-answer="${q.id}" id="answer-${q.id}" placeholder="${rowBusy ? '' : '아직 작성되지 않았습니다. 「이 문항 작성」을 누르세요.'}" ${busy ? 'readonly' : ''}>${esc(text)}</textarea>
       <div id="count-${q.id}">${countHtml(q, text)}</div>
       ${text ? `
@@ -455,6 +519,7 @@ function renderSide() {
   const u = p.usage;
   const busy = state.ui.busy;
   const exps = p.experiences;
+  const openIds = new Set([...document.querySelectorAll('#side .exp details[open]')].map((d) => d.dataset.id));
   $('#side').innerHTML = `
   <div class="card">
     <div class="card-head"><h3>경험 카드 <span class="muted small">${exps.length}</span></h3><button class="btn sm" data-action="exp-add" ${busy ? 'disabled' : ''}>+ 직접 추가</button></div>
@@ -462,7 +527,7 @@ function renderSide() {
       <div class="exp">
         <div class="t"><span>${esc(e.title || '(제목 없음)')}</span><span class="id">${e.questionIds?.length ? e.questionIds.join(',') : '-'}</span></div>
         ${e.keywords?.length ? `<div class="k">${e.keywords.map((k) => esc(k)).join(' · ')}</div>` : ''}
-        <details><summary>자세히</summary>
+        <details data-id="${e.id}" ${openIds.has(e.id) ? 'open' : ''}><summary>자세히</summary>
           <dl><dt>상황</dt><dd>${esc(e.situation || '-')}</dd><dt>과제</dt><dd>${esc(e.task || '-')}</dd><dt>행동</dt><dd>${esc(e.action || '-')}</dd><dt>결과</dt><dd>${esc(e.result || '-')}</dd><dt>배운 점</dt><dd>${esc(e.learned || '-')}</dd></dl>
           <div class="btn-row" style="margin-top:.4rem"><button class="btn sm" data-action="exp-edit" data-id="${e.id}">편집</button><button class="btn sm ghost danger" data-action="exp-delete" data-id="${e.id}">삭제</button></div>
         </details>
@@ -517,7 +582,7 @@ const interviewHandlers = () => ({
     const el = $('#chat .msg.streaming');
     if (el) { el.textContent = q; $('#chat').scrollTop = $('#chat').scrollHeight; }
   },
-  onExperience: () => { save(); renderSide(); },
+  onExperience: () => { renderSide(); }, // 저장은 턴이 끝난 뒤 runTask에서(도구 결과 없는 히스토리를 남기지 않기 위해)
 });
 
 async function startInterview() {
@@ -666,14 +731,23 @@ function exportProject() {
 }
 
 async function importProject(file) {
+  if (state.ui.busy) { toast('작업 중에는 가져올 수 없습니다. 먼저 중단하세요.', 'bad'); return; }
+  const prev = state.project;
   try {
     const text = await file.text();
     const data = JSON.parse(text);
     const project = normalizeProject(data.project ?? data);
     if (!project.questions.length && !project.profile.company) throw new Error('프로젝트 형식이 아닙니다.');
     state.project = project;
+    state.ui.stageLog = {};
+    try {
+      render(); // 렌더링이 성공한 뒤에만 저장한다
+    } catch (renderErr) {
+      state.project = prev;
+      render();
+      throw new Error(`화면을 그릴 수 없는 데이터입니다 (${renderErr.message})`);
+    }
     save();
-    render();
     toast('가져왔습니다.', 'ok');
   } catch (err) {
     toast(`가져오기 실패: ${err.message}`, 'bad');
@@ -776,7 +850,7 @@ const actions = {
     p.jdSummary = { competencies: res.competencies ?? [], talent: res.talent ?? '', notes: res.notes ?? '' };
     if (res.questions?.length) {
       const replace = !state.project.questions.some((q) => q.text.trim()) || confirm(`공고에서 문항 ${res.questions.length}개를 찾았습니다. 기존 문항을 이것으로 교체할까요? (취소하면 뒤에 추가합니다)`);
-      if (replace) { state.project.questions = []; state.project.answers = {}; }
+      if (replace) replaceQuestions();
       for (const q of res.questions) addQuestion({ text: q.text, limit: q.limit || 0, mode: q.mode === 'unknown' ? 'with' : q.mode, type: q.type });
       toast(`문항 ${res.questions.length}개를 ${replace ? '설정' : '추가'}했습니다. 글자수 기준을 확인하세요.`, 'ok');
     } else {
@@ -854,28 +928,29 @@ document.addEventListener('click', (ev) => {
 document.addEventListener('change', (ev) => {
   const el = ev.target;
   if (el.dataset.actionChange === 'q-template') {
-    const tpl = COMMON_QUESTIONS[Number(el.value)];
+    const tpl = el.value === '' ? null : COMMON_QUESTIONS[Number(el.value)];
     if (tpl) { addQuestion(tpl); save(); renderStage(); }
     el.value = '';
   } else if (el.dataset.actionChange === 'q-preset') {
     const preset = COMPANY_PRESETS.find((c) => c.id === el.value);
     if (preset) {
       const replace = !state.project.questions.some((q) => q.text.trim()) || confirm(`「${preset.name}」 문항 ${preset.questions.length}개로 기존 문항을 교체할까요? (취소하면 뒤에 추가)\n${preset.note}`);
-      if (replace) { state.project.questions = []; state.project.answers = {}; }
+      if (replace) replaceQuestions();
       for (const q of preset.questions) addQuestion(q);
       save(); renderStage();
     }
     el.value = '';
   } else if (el.dataset.bind) {
     setBind(el.dataset.bind, el.type === 'checkbox' ? el.checked : el.value);
-    if (el.dataset.bind === 'profile.jobPosting') renderStage();
   } else if (el.dataset.qbind) {
     const q = state.project.questions.find((x) => x.id === el.dataset.id);
     if (!q) return;
     const k = el.dataset.qbind;
     q[k] = k === 'limit' ? Math.max(0, Number(el.value) || 0) : el.value;
     save();
-    if (k !== 'text') renderStage();
+    // 전체 재렌더는 클릭 중인 버튼을 파괴하므로 요약 문구만 갱신한다
+    const summary = el.closest('.q-row')?.querySelector('.q-summary');
+    if (summary) summary.innerHTML = qSummary(q);
   } else if (el.id === 'import-file' && el.files?.[0]) {
     importProject(el.files[0]).then(() => { $('#project-dialog').close(); el.value = ''; });
   }
@@ -883,7 +958,14 @@ document.addEventListener('change', (ev) => {
 
 document.addEventListener('input', (ev) => {
   const el = ev.target;
-  if (el.dataset.bind) { if (el.type !== 'checkbox' && el.type !== 'radio') setBind(el.dataset.bind, el.value); return; }
+  if (el.dataset.bind) {
+    if (el.type !== 'checkbox' && el.type !== 'radio') setBind(el.dataset.bind, el.value);
+    if (el.dataset.bind === 'profile.jobPosting') {
+      const btn = $('button[data-action="analyze-jd"]');
+      if (btn) btn.disabled = !!state.ui.busy || !el.value.trim();
+    }
+    return;
+  }
   if (el.dataset.qbind === 'text') { const q = state.project.questions.find((x) => x.id === el.dataset.id); if (q) { q.text = el.value; save(); } return; }
   if (el.dataset.answer) {
     const q = state.project.questions.find((x) => x.id === el.dataset.answer);

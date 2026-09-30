@@ -66,7 +66,8 @@ try {
   await page.fill('#f-role', '백엔드 개발');
   await page.fill('#f-bg', '컴퓨터공학 졸업 예정, 스프링 기반 프로젝트 2회');
   await page.fill('#f-jd', '[네이버 백엔드 신입 채용] 자격요건: Java/Spring, 대규모 트래픽 경험 우대. 자기소개서 문항 1. 지원 동기(1000자) 2. 협업 갈등 해결 경험(700자)');
-  await page.dispatchEvent('#f-jd', 'change');
+  // 붙여넣기 직후 첫 클릭이 먹어야 한다(재렌더로 버튼이 교체되면 안 됨)
+  assert.equal(await page.locator('button[data-action="analyze-jd"]').isDisabled(), false, '입력 즉시 분석 버튼 활성화');
   await page.click('button[data-action="analyze-jd"]');
   await page.waitForSelector('.q-row', { timeout: 15000 });
   assert.equal(await page.locator('.q-row').count(), 2);
@@ -84,7 +85,7 @@ try {
   await shot('03-interview-q1');
   await page.fill('#iv-answer', '캡스톤 프로젝트에서 API 성능을 개선했고, 동아리에서 예산을 관리했습니다.');
   await page.keyboard.press('Control+Enter');
-  await page.waitForFunction(() => document.querySelectorAll('.msg.agent').length >= 2, null, { timeout: 15000 });
+  await page.waitForFunction(() => document.querySelectorAll('.msg.agent:not(.streaming)').length >= 2, null, { timeout: 15000 });
   await page.waitForSelector('#iv-answer:not([disabled])');
   assert.equal(await page.locator('#side .exp').count(), 1, '경험 카드 1개 저장');
   assert.match(await page.locator('#side .exp .t').first().textContent(), /3초→0.4초/);
@@ -135,7 +136,9 @@ try {
   // q2는 700자 제한: 초안이 길면 글자수 조정 버전이 생겨야 함
   const q2Labels = await page.locator('.answer-card[data-qid="q2"] .versions .v').allTextContents();
   assert.ok(q2Labels.some((l) => l.includes('글자수 조정')), q2Labels.join(','));
-  assert.match(await page.locator('#count-q2 .count').textContent(), /범위 내|부족/);
+  assert.match(await page.locator('#count-q2 .count').textContent(), /범위 내/);
+  const q2Count = await page.evaluate(() => { const s = window.__jaso.state; const a = s.project.answers.q2; const v = a.versions.find((x) => x.id === a.currentVersionId); return Array.from(v.text.replace(/\r\n?/g, '\n')).length; });
+  assert.ok(q2Count >= 630 && q2Count <= 700, `q2 글자수 ${q2Count}`);
   await shot('05-write-done');
   step('전체 작성: 초안→첨삭→수정→첨삭→(글자수 조정) 완료');
 
@@ -154,9 +157,13 @@ try {
   assert.ok(apiRequests.at(-1).body.messages[0].content.includes('[수정할 구간'));
   step('선택 구간 부분 수정');
 
-  // 버전 전환
-  await page.click('.answer-card[data-qid="q1"] .versions .v:nth-child(2)');
-  assert.ok((await page.inputValue('#answer-q1')).startsWith('[성능 개선으로 증명한 집요함]'));
+  // 버전 전환: 초안으로 되돌리면 이후 수정 내용이 사라져야 한다
+  await page.click('.answer-card[data-qid="q1"] .versions .v:has-text("초안")');
+  const draftText = await page.inputValue('#answer-q1');
+  assert.ok(draftText.startsWith('[성능 개선으로 증명한 집요함]'));
+  assert.ok(!draftText.includes('측정값을 공유하는 습관'), '초안에는 부분 수정 내용이 없어야 함');
+  assert.ok(!draftText.includes('(요청 반영)'));
+  assert.ok(await page.locator('.answer-card[data-qid="q1"] .versions .v.current').textContent().then((t) => t.includes('초안')));
   step('버전 전환');
 
   // 완성 + 면접 예상 질문
@@ -176,6 +183,25 @@ try {
   assert.equal(await page.locator('.prep-q').count(), 2);
   assert.equal(await page.locator('#side .exp').count(), 2);
   step('새로고침 후 localStorage 복원');
+
+  // 가져오기: 악성 첨삭 값·깨진 프로필이 렌더링을 깨거나 스크립트를 실행하지 못해야 한다
+  const badJson = JSON.stringify({ project: {
+    profile: { company: 'x', jobPosting: null, jdSummary: 'nope' },
+    questions: [{ id: 'q2', text: 'A', limit: 500 }, { text: 'B', mode: 'constructor' }],
+    answers: { q2: { versions: [{ id: 'v1', text: 'hi', critique: { total: '<img src=x onerror="window.__xss=1">', must_fix: [], issues: [], strengths: [], scores: {} } }], currentVersionId: 'v1' } },
+    step: 'write', prep: { questions: 'str' }, interview: { transcript: [null] },
+  } });
+  await page.evaluate((json) => { const f = new File([json], 'p.json', { type: 'application/json' }); const dt = new DataTransfer(); dt.items.add(f); const input = document.querySelector('#import-file'); input.files = dt.files; input.dispatchEvent(new Event('change', { bubbles: true })); }, badJson);
+  await page.waitForFunction(() => window.__jaso.state.project.profile.company === 'x', null, { timeout: 5000 });
+  assert.equal(await page.evaluate(() => window.__xss), undefined, 'XSS 실행되지 않음');
+  const imported = await page.evaluate(() => { const p = window.__jaso.state.project; return { ids: p.questions.map((q) => q.id), modes: p.questions.map((q) => q.mode), crit: p.answers.q2?.versions[0]?.critique, jd: p.profile.jdSummary, jobPosting: p.profile.jobPosting }; });
+  assert.deepEqual(imported.ids, ['q2', 'q3'], '충돌 없는 문항 id');
+  assert.deepEqual(imported.modes, ['with', 'with']);
+  assert.equal(imported.crit, null, '깨진 첨삭은 버림');
+  assert.equal(imported.jd, null);
+  assert.equal(imported.jobPosting, '');
+  assert.equal(await page.locator('.answer-card').count(), 2);
+  step('악성·불완전 JSON 가져오기 방어');
 
   // 사용량 표시
   const usage = await page.locator('#side .usage').textContent();

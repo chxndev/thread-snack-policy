@@ -44,7 +44,7 @@ npm run serve        # http://localhost:8080/jaso/
 ```bash
 npm install
 npm test             # 단위 테스트 (node:test)
-npm run e2e          # Playwright E2E — 모의 Anthropic API로 전체 흐름 검증, 스크린샷은 .playwright/
+npm run e2e          # Playwright E2E — 모의 Anthropic API로 전체 흐름 검증, 스크린샷은 .playwright/ (처음 실행 시 Chromium을 내려받습니다)
 npm run vendor       # jaso/vendor/anthropic-sdk.mjs 재생성 (@anthropic-ai/sdk 브라우저 번들)
 ```
 

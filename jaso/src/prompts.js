@@ -34,7 +34,7 @@ export const INTERVIEWER_SYSTEM = `당신은 취업 준비생의 자기소개서
 2. 후보별로 깊이 파고듭니다. 파악할 것: 언제·어디서·기간, 맡은 역할과 팀 규모, 구체적 과제나 어려움, 본인이 실제로 한 행동(무엇을·어떻게·왜 그렇게), 결과(수치·변화·주변 평가), 배운 점이나 이후 달라진 행동. 답이 모호하면 한 번 더 구체화를 요청하되, 같은 것을 두 번 이상 캐묻지 않습니다.
 3. 한 경험의 상황·행동·결과가 파악되면 즉시 save_experience로 저장합니다. 이미 저장한 경험에 정보가 더해지면 같은 id로 다시 호출해 갱신합니다. 카드 내용은 지원자가 말한 것만으로 채우고, 말하지 않은 것은 빈 문자열로 둡니다. 절대 지어내지 않습니다.
 4. 지원동기 계열 문항이 있으면 반드시 확인합니다: 이 회사·직무를 고른 개인적 계기, 관련해서 해 온 준비(공부·프로젝트·자격·인턴), 회사에 대해 아는 것과 끌리는 지점, 입사 후 하고 싶은 일.
-5. 각 문항에 쓸 만한 경험이 최소 1개(직무 역량·협업·실패 같은 핵심 문항은 2개) 확보되면 finish_interview를 호출합니다. 보통 6~12개 질문 안에 끝납니다. 지원자가 "충분하다", "그만하자"고 하면 아직 저장하지 않은 경험을 정리해 저장한 뒤 바로 finish_interview를 호출합니다.
+5. 각 문항에 쓸 만한 경험이 최소 1개(직무 역량·협업·실패 같은 핵심 문항은 2개) 확보되면 finish_interview를 호출합니다. 질문 예산은 지원 정보에 적혀 있습니다(대략 문항 수의 2배). 예산이 다 되면 핵심 문항부터 채운 상태로 마무리하고, 지원자가 "충분하다", "그만하자"고 하면 아직 저장하지 않은 경험을 정리해 저장한 뒤 바로 finish_interview를 호출합니다.
 
 ## 문항 유형별로 꼭 확인할 것
 - 지원동기: 이 회사를 알게 된 계기, 직접 써 본 제품·서비스와 거기서 느낀 아쉬움(페인포인트), 직무를 위해 해 온 준비, 입사 후 1~3년 안에 하고 싶은 일. 확인되지 않은 회사 정보는 쓰지 않으므로, 지원자가 실제로 아는 것만 묻습니다.
@@ -139,7 +139,7 @@ export const WRITER_SYSTEM = `당신은 한국 기업 채용 자기소개서를 
 
 ## 출력 형식
 - 자기소개서 본문만 출력합니다. 제목, 설명, 마크다운, 따옴표, 인사말, "답변:" 같은 라벨을 붙이지 않습니다.
-- 소제목을 쓰라는 지시가 있으면 첫 줄에 [소제목] 형태로 한 줄을 쓰고 빈 줄 없이 본문을 잇습니다. 소제목은 20자 이내, "결과+행동"이 드러나게(예: [불만 응대 프로세스 개선, 클레임 40% 감소]). [지원동기], [직무역량] 같은 기능 라벨이나 본문 첫 문장과 같은 내용은 금지. 소제목도 글자수에 포함됩니다. 소제목 없이 쓰라는 지시가 있으면 쓰지 않습니다. "판단"이면 제한 700자 이상일 때만 씁니다.
+- 소제목을 쓰라는 지시가 있으면 첫 줄에 [소제목] 형태로 한 줄을 쓰고 빈 줄 없이 본문을 잇습니다. 소제목은 20자 이내, "결과+행동"이 드러나게(예: [불만 응대 개선, 클레임 40% 감소]). [지원동기], [직무역량] 같은 기능 라벨은 금지하고, 본문 첫 문장을 그대로 반복하지 않습니다(같은 결론을 다른 표현으로 요약하는 것은 가능). 소제목도 글자수에 포함됩니다. 소제목 없이 쓰라는 지시가 있으면 쓰지 않습니다. "판단"이면 제한 700자 이상일 때만 씁니다.
 - 문단은 빈 줄 없이 줄바꿈 한 번으로 나눕니다(줄바꿈도 글자수에 포함되므로 최소화).`;
 
 export const CRITIC_SYSTEM = `당신은 대기업과 스타트업 채용을 두루 경험한 인사담당자이자 자기소개서 평가위원입니다. 자소서 한 건에 2~3분, 첫 5초 스캔으로 정독 여부를 정하는 실제 심사 방식으로 읽습니다. 주어진 문항과 답변을 아래 기준으로 냉정하게 평가하고, 지원자에게 실제로 도움이 되는 수정 지시를 만듭니다. 칭찬보다 감점 요인을 찾는 데 집중하되, 근거 없는 트집은 잡지 않습니다.
@@ -147,10 +147,10 @@ export const CRITIC_SYSTEM = `당신은 대기업과 스타트업 채용을 두�
 ## 평가 기준 (각 1~5점)
 - fit 문항 적합성: 묻는 것에 정확히 답했는가. 문항이 요구한 요소가 빠지지 않았는가. 동문서답·일반론·회사 소개로 채우지 않았는가. 한 문항에 메시지가 하나로 모이는가.
 - specificity 구체성: 수치(비율·기간·건수·전후 비교)·고유명사·구체적 장면이 있는가. 추상 형용사(성실·노력·책임감·열정·창의적)와 정량화 불가 수식어(항상·많이·다양한)가 사례 없이 쓰이지 않았는가. 행동이 팀이 아닌 "나"의 행동으로, 분량의 40% 이상인가.
-- structure 두괄식·논리: 첫 1~2문장에 결론이 있는가(배경·일반론·"저는 ~한 사람입니다" 시작은 감점). 상황→행동→결과→배운 점→직무 연결의 인과가 맞는가. 소제목이 있다면 20자 이내에 결과·행동이 드러나는가([지원동기] 같은 기능 라벨, 첫 문장과 중복, 뻔한 소제목은 삭제 권고).
+- structure 두괄식·논리: 첫 1~2문장에 결론이 있는가(배경·일반론·"저는 ~한 사람입니다" 시작은 감점. 단, 성장과정·가치관처럼 서사형 문항의 짧은 장면 오프닝은 감점하지 않는다). 상황→행동→결과→배운 점→직무 연결의 인과가 맞는가. 소제목이 있다면 20자 이내에 결과·행동이 드러나는가([지원동기] 같은 기능 라벨, 첫 문장의 단순 반복, 뻔한 소제목은 문구 개선을 제안. 삭제 권고는 요청에 적힌 소제목 정책이 허용할 때만).
 - relevance 직무·회사 연관성: 경험이 지원 직무에 필요한 역량과 연결되는가. 회사 언급이 확인된 사실 기반인가("업계 1위", "비전에 공감" 같은 겉치레는 감점). 회사명만 바꿔도 성립하는 문장은 아닌가. 마무리가 직무 기여로 이어지는가.
 - style 문체·표현: 합쇼체 통일, 문장 길이의 리듬(45~60자 균일이면 감점), 같은 어미 3연속, 번역투·상투구, "저는" 반복, "귀사", 접속사 과다(또한·그리고·더불어·따라서·나아가·이처럼), 첫째·둘째·셋째 병렬, 맞춤법(되/돼, 로서/로써, 며칠, 역할, 띄어쓰기), 오탈자. "AI가 쓴 티": "열정을 바탕으로"·"주도적으로 문제를 해결"·"책임감 있게"·"귀사의 비전에 깊이 공감" 같은 추상 상투구, "다양한 프로젝트"식 뭉뚱그림, 숫자·고유명사·시행착오 부재, "어려움이 있었지만 극복했습니다"식 얼버무림, "~하는 데 기여했습니다"·"이를 통해" 반복, 모든 문장에 수치.
-- authenticity 진정성: 실제 경험처럼 읽히는가. 과장이나 창작 의심 지점, 경험 카드에 없는 사실·수치·회사 정보, 미확인 대괄호 항목, 이력 요약과의 불일치, 실패 문항에서 타인 탓·변명·억지 성공담.
+- authenticity 진정성: 실제 경험처럼 읽히는가. 과장이나 창작 의심 지점, 경험 카드에 없는 사실·수치·회사 정보, 이력 요약과의 불일치, 실패 문항에서 타인 탓·변명·억지 성공담. "[확인: …]" 대괄호는 작성자가 의도적으로 남긴 빈칸 표시이므로 감점하거나 issues·must_fix에 올리지 않는다(3개 이상이면 low 이슈로 "확인 항목이 많음"만 지적).
 
 ## 산출 규칙
 - total: 100점 환산. 가중치 fit 25, specificity 20, structure 15, relevance 20, style 10, authenticity 10. (각 점수/5 × 가중치의 합, 정수로 반올림)
@@ -229,7 +229,7 @@ export const EDIT_PRESETS = [
   { id: 'lead', label: '두괄식 강화', instruction: '첫 문장에서 결론과 핵심 역량이 바로 드러나도록 도입부를 다시 써 주세요.' },
   { id: 'natural', label: '더 자연스럽게', instruction: '기계적으로 읽히는 표현, 번역투, 반복되는 연결어를 걷어내고 사람이 쓴 것처럼 자연스럽게 다듬어 주세요.' },
   { id: 'job', label: '직무 연결 강화', instruction: '경험에서 얻은 역량이 지원 직무에서 어떻게 발휘될지 마무리 부분에서 더 구체적으로 연결해 주세요.' },
-  { id: 'subhead_on', label: '소제목 추가', instruction: '첫 줄에 결론이 드러나는 [소제목]을 추가해 주세요(15자 이내).' },
+  { id: 'subhead_on', label: '소제목 추가', instruction: '첫 줄에 결과와 행동이 드러나는 [소제목]을 추가해 주세요(20자 이내).' },
   { id: 'subhead_off', label: '소제목 제거', instruction: '소제목을 제거하고 본문만 남겨 주세요. 필요하면 첫 문장을 다듬어 결론이 드러나게 하세요.' },
 ];
 
@@ -303,6 +303,12 @@ export function formatExperiences(experiences, { questionIds } = {}) {
     .join('\n');
 }
 
+/** 문항 수에 비례한 질문 예산 (6~20) */
+export function interviewBudget(questions) {
+  const n = Array.isArray(questions) ? questions.length : 0;
+  return Math.min(20, Math.max(6, n * 2 + 2));
+}
+
 /** 인터뷰 첫 user 메시지 */
 export function buildInterviewOpening(project) {
   return [
@@ -315,6 +321,8 @@ export function buildInterviewOpening(project) {
     project.experiences?.length
       ? `[이미 입력된 경험 카드]\n${formatExperiences(project.experiences)}\n`
       : '',
+    `질문 예산: 약 ${interviewBudget(project.questions)}개 (초과해도 되지만 핵심 문항부터 채우세요)`,
+    '',
     '인터뷰를 시작하세요. ask_user로 첫 질문을 하세요.',
   ]
     .filter((s) => s !== null && s !== undefined)
@@ -327,9 +335,29 @@ export const INTERVIEW_FINISH_REQUEST =
 export const INTERVIEW_SKIP_ANSWER = '이 질문은 넘어가겠습니다. 다른 경험이나 다른 문항 이야기를 물어봐 주세요.';
 
 function subheadingInstruction(pref, question) {
-  if (pref === 'on') return '소제목: 사용(첫 줄 [소제목])';
+  if (pref === 'on') return '소제목: 사용(첫 줄 [소제목], 20자 이내)';
   if (pref === 'off') return '소제목: 사용하지 않음';
-  return `소제목: 판단(제한 ${question.limit || 0}자 기준 700자 이상이면 사용)`;
+  if (!question.limit) return '소제목: 판단(제한 없음 → 800~1000자 분량이므로 사용 권장)';
+  return `소제목: 판단(제한 ${question.limit}자 — 700자 이상이면 사용)`;
+}
+
+function modeNote(mode) {
+  if (mode === 'without') return '공백·줄바꿈은 세지 않고 소제목 글자는 포함';
+  if (mode === 'bytes2') return '한글 2byte·영문/숫자/공백 1byte, 줄바꿈 1byte, 소제목 포함';
+  return '줄바꿈 1자·소제목 포함';
+}
+
+/** 작성자용 현재 글자수 안내 (목표 범위는 lengthTarget과 동일 기준) */
+export function describeCurrent(text, question) {
+  const mode = COUNT_MODES[question.mode] ?? COUNT_MODES.with;
+  const j = judgeLength(text, question.limit, question.mode);
+  if (!question.limit) return `현재 글자수: ${j.count}${mode.unit} (${mode.label}, 제한 없음)`;
+  const t = writingTarget(question.limit);
+  let status = '목표 범위 내';
+  if (j.count > t.max) status = `${j.count - t.max}${mode.unit} 초과 — 반드시 줄일 것`;
+  else if (j.count < t.min) status = `${t.min - j.count}${mode.unit} 부족`;
+  else if (j.count > t.aim) status = `범위 내(상한에 가까움, ${j.count - t.aim}${mode.unit} 여유 없음)`;
+  return `현재 글자수: ${j.count}${mode.unit} / 제한 ${t.max}${mode.unit} (${mode.label}) — ${status}`;
 }
 
 /** 작성 목표 상한: 제한의 96% (모델은 글자수를 정확히 세지 못하므로 여유를 둔다) */
@@ -343,7 +371,7 @@ function lengthTarget(question) {
   if (!question.limit) return '글자수: 제한 없음. 800~1000자(공백 포함) 분량으로 작성.';
   const mode = COUNT_MODES[question.mode] ?? COUNT_MODES.with;
   const t = writingTarget(question.limit);
-  return `글자수: 제한 ${t.max}${mode.unit} (${mode.label}, 줄바꿈과 소제목 포함). 목표 ${t.min}~${t.aim}${mode.unit}. 절대 ${t.max}${mode.unit}를 넘기지 마세요.`;
+  return `글자수: 제한 ${t.max}${mode.unit} (${mode.label}; ${modeNote(question.mode)}). 목표 ${t.min}~${t.aim}${mode.unit}. 절대 ${t.max}${mode.unit}를 넘기지 마세요.`;
 }
 
 /** 초안 작성 user 메시지 */
@@ -376,15 +404,24 @@ export function buildDraftRequest(project, question, { otherAnswers = [], subhea
 }
 
 /** 첨삭(평가) user 메시지 */
-export function buildCritiqueRequest(project, question, text) {
+function subheadingPolicyForCritic(pref) {
+  if (pref === 'on') return '소제목 정책: 사용자가 소제목 사용을 지정함 — 삭제 권고 금지, 문구 개선만 제안.';
+  if (pref === 'off') return '소제목 정책: 소제목 사용 안 함 — 소제목이 있으면 must_fix에 "소제목 제거".';
+  return '소제목 정책: 자유 — 있어도 되고 없어도 됨. 뻔하거나 중복이면 삭제 또는 개선 제안 가능.';
+}
+
+export function buildCritiqueRequest(project, question, text, { subheading = 'auto' } = {}) {
   const j = judgeLength(text, question.limit, question.mode);
+  const type = questionTypeLabel(question.type);
   return [
     '[지원 정보]',
     formatProfile(project.profile),
     '',
     '[문항]',
     `${question.id}. ${question.text.trim()}`,
+    type ? `문항 유형: ${type}` : '',
     `글자수 판정: ${describeLength(j, question.mode)}`,
+    subheadingPolicyForCritic(subheading),
     '',
     '[경험 카드 — 사실 대조용]',
     formatExperiences(project.experiences, { questionIds: [question.id] }),
@@ -394,7 +431,7 @@ export function buildCritiqueRequest(project, question, text) {
     '',
     '[지시]',
     '위 답변을 평가 기준에 따라 채점하고 수정 지시를 JSON으로 출력하세요. 글자수는 앱이 별도로 조정하므로 must_fix에 넣지 말고, 줄여도 되는 군더더기가 있으면 issues에 low로만 제안하세요.',
-  ].join('\n');
+  ].filter((l) => l !== '').join('\n');
 }
 
 function formatCritique(critique) {
@@ -410,30 +447,40 @@ function formatCritique(critique) {
 }
 
 /** 첨삭 반영 수정 user 메시지 */
-export function buildReviseRequest(project, question, text, critique, { subheading = 'auto' } = {}) {
-  const j = judgeLength(text, question.limit, question.mode);
-  return [
+export function buildReviseRequest(project, question, text, critique, { subheading = 'auto', otherAnswers = [] } = {}) {
+  const type = questionTypeLabel(question.type);
+  const parts = [
     '[지원 정보]',
     formatProfile(project.profile),
     '',
     '[문항]',
     `${question.id}. ${question.text.trim()}`,
+    type ? `문항 유형: ${type}` : '',
     lengthTarget(question),
     subheadingInstruction(subheading, question),
     '',
     '[경험 카드 — 사실은 여기에 있는 것만]',
     formatExperiences(project.experiences, { questionIds: [question.id] }),
+  ];
+  if (nonEmpty(project.interview?.summary)) parts.push('', '[인터뷰 요약]', project.interview.summary.trim());
+  if (nonEmpty(project.interview?.writerNotes)) parts.push('', '[인터뷰어 메모]', project.interview.writerNotes.trim());
+  if (otherAnswers.length) {
+    parts.push('', '[다른 문항에 이미 쓴 답변 — 같은 사례·표현 반복 금지]');
+    for (const a of otherAnswers) parts.push(`(${a.id}) ${a.questionText}\n${a.text}\n`);
+  }
+  parts.push(
     '',
     '[현재 답변]',
     text,
-    `현재 글자수: ${describeLength(j, question.mode)}`,
+    describeCurrent(text, question),
     '',
     '[첨삭 결과]',
     formatCritique(critique),
     '',
     '[지시]',
-    '첨삭 결과의 "반드시 수정"과 "문제 지점"을 모두 반영해 답변 전체를 다시 쓰세요. 강점은 유지하세요. 글자수 목표 범위를 지키세요. 수정한 답변 본문만 출력하세요.',
-  ].join('\n');
+    '첨삭 결과의 "반드시 수정"과 "문제 지점"을 모두 반영해 답변 전체를 다시 쓰세요. 강점은 유지하세요. "[확인: …]" 표시는 지원자가 채울 빈칸이므로 사실을 지어내 메우지 말고, 필요하면 그대로 두세요. 글자수 목표 범위를 지키세요. 수정한 답변 본문만 출력하세요.',
+  );
+  return parts.filter((l) => l !== '').join('\n');
 }
 
 /** 글자수만 맞추는 수정 user 메시지 */
@@ -445,13 +492,16 @@ export function buildLengthFixRequest(project, question, text) {
     ? `${j.count - t.aim}${mode.unit} 이상 줄여서 ${t.min}~${t.aim}${mode.unit} 안에 맞추세요. 배경 설명 → 수식어 → 중복 근거 순으로 빼고, 수치·고유명사·행동·결과는 지키세요.`
     : `${-j.diff}${mode.unit} 이상 늘려서 ${t.min}~${t.aim}${mode.unit} 안에 맞추세요. 행동의 이유와 결과의 구체적 영향을 보강하되 없는 사실은 만들지 마세요.`;
   return [
+    '[지원 정보]',
+    formatProfile(project.profile),
+    '',
     '[문항]',
     `${question.id}. ${question.text.trim()}`,
     lengthTarget(question),
     '',
     '[현재 답변]',
     text,
-    `현재 글자수: ${describeLength(j, question.mode)}`,
+    describeCurrent(text, question),
     '',
     '[경험 카드 — 사실은 여기에 있는 것만]',
     formatExperiences(project.experiences, { questionIds: [question.id] }),
@@ -461,36 +511,45 @@ export function buildLengthFixRequest(project, question, text) {
   ].join('\n');
 }
 
+function upperBoundOnly(question) {
+  if (!question.limit) return '글자수: 제한 없음.';
+  const mode = COUNT_MODES[question.mode] ?? COUNT_MODES.with;
+  const t = writingTarget(question.limit);
+  return `글자수: 제한 ${t.max}${mode.unit} (${mode.label}; ${modeNote(question.mode)}). 절대 ${t.max}${mode.unit}를 넘기지 마세요. 요청이 분량을 줄이는 것이 아니라면 ${t.min}${mode.unit} 이상을 유지하세요.`;
+}
+
 /** 사용자 지시 편집 user 메시지 */
 export function buildEditRequest(project, question, text, instruction) {
-  const j = judgeLength(text, question.limit, question.mode);
   return [
     '[지원 정보]',
     formatProfile(project.profile),
     '',
     '[문항]',
     `${question.id}. ${question.text.trim()}`,
-    lengthTarget(question),
+    upperBoundOnly(question),
     '',
     '[경험 카드 — 사실은 여기에 있는 것만]',
     formatExperiences(project.experiences, { questionIds: [question.id] }),
     '',
     '[현재 답변]',
     text,
-    `현재 글자수: ${describeLength(j, question.mode)}`,
+    describeCurrent(text, question),
     '',
     '[사용자 요청]',
     instruction.trim(),
     '',
     '[지시]',
-    '사용자 요청을 반영해 답변 전체를 다시 쓰세요. 요청과 무관한 부분은 최대한 그대로 두고, 글자수 목표 범위를 지키세요. 수정한 답변 본문만 출력하세요.',
+    '사용자 요청을 반영해 답변 전체를 다시 쓰세요. 요청과 무관한 부분은 최대한 그대로 두세요. 수정한 답변 본문만 출력하세요.',
   ].join('\n');
 }
 
 
 // ───────────────────────────── 공고 분석 ─────────────────────────────
 
-export const JD_ANALYST_SYSTEM = `당신은 한국 채용 공고를 분석해 자기소개서 준비에 필요한 정보를 뽑아내는 채용 분석가입니다. 주어진 공고 텍스트에서 사실만 추출하고, 없는 정보는 빈 값(문자열은 "", 숫자는 0, 열거형은 "unknown")으로 둡니다. 자기소개서 문항이 있으면 문구를 원문 그대로 옮기고, 글자수 제한과 공백 포함/제외 기준이 명시돼 있으면 그대로, 없으면 0/unknown으로 둡니다. 문항이 전혀 없으면 questions는 빈 배열입니다. competencies에는 공고가 요구하는 역량·경험·기술 키워드를 5~10개, talent에는 인재상·조직문화 관련 문구를 2~3문장으로 요약합니다. notes에는 지원자가 자소서에서 꼭 건드려야 할 포인트를 3개 이내로 적습니다.`;
+export const JD_ANALYST_SYSTEM = `당신은 한국 채용 공고를 분석해 자기소개서 준비에 필요한 정보를 뽑아내는 채용 분석가입니다. 주어진 공고 텍스트에서 사실만 추출하고, 없는 정보는 빈 값으로 둡니다: 문자열은 "", 숫자(limit)는 0, level과 mode는 "unknown". 자기소개서 문항이 있으면 문구를 원문 그대로 옮기고, 글자수 제한과 공백 기준이 명시돼 있으면 그대로, 없으면 0/unknown으로 둡니다. 문항이 전혀 없으면 questions는 빈 배열입니다.
+- mode 값: with=공백 포함, without=공백 제외, bytes2=바이트 기준(한글 2byte), unknown=기준 미표기.
+- type 값(문항 유형): ${QUESTION_TYPES.map((t) => `${t.id}=${t.label}`).join(', ')}. 판단이 어려우면 free.
+competencies에는 공고가 요구하는 역량·경험·기술 키워드를 5~10개, talent에는 인재상·조직문화 관련 문구를 2~3문장으로 요약합니다. notes에는 지원자가 자소서에서 꼭 건드려야 할 포인트를 3개 이내로 적습니다.`;
 
 export const JD_SCHEMA = {
   type: 'object',
@@ -567,18 +626,20 @@ export function buildAlternativeRequest(project, question, existingText, opts = 
 
 /** 선택 구간만 고치는 부분 수정 요청 */
 export function buildSelectionEditRequest(project, question, text, selection, instruction) {
-  const j = judgeLength(text, question.limit, question.mode);
   return [
+    '[지원 정보]',
+    formatProfile(project.profile),
+    '',
     '[문항]',
     `${question.id}. ${question.text.trim()}`,
-    lengthTarget(question),
+    upperBoundOnly(question),
     '',
     '[경험 카드 — 사실은 여기에 있는 것만]',
     formatExperiences(project.experiences, { questionIds: [question.id] }),
     '',
     '[현재 답변 전체]',
     text,
-    `현재 글자수: ${describeLength(j, question.mode)}`,
+    describeCurrent(text, question),
     '',
     '[수정할 구간 — 답변 안의 이 부분만 고칩니다]',
     selection.trim(),

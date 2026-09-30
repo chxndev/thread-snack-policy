@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { createAgent, upsertExperience, currentText, AgentError } from '../jaso/src/agent.js';
+import { createAgent, upsertExperience, currentText, AgentError, stripPreFallback } from '../jaso/src/agent.js';
 import { fakeClient, makeMessage, text, toolUse, thinking, sampleProject } from './helpers/fake-client.js';
 
 const goodCritique = (over = {}) => JSON.stringify({
@@ -272,4 +272,86 @@ test('같은 턴에 ask_user와 finish_interview가 오면 질문에도 tool_res
   assert.equal(r.type, 'done');
   const last = project.interview.messages.at(-1);
   assert.deepEqual(last.content.map((b) => b.tool_use_id).sort(), ['ask_last', 'fin']);
+});
+
+test('응답 도중 폴백이 일어나면 경계 앞의 thinking/tool_use는 실행·재전송하지 않는다', async () => {
+  const project = sampleProject();
+  const fallback = { type: 'fallback', from: { model: 'claude-opus-5-5' }, to: { model: 'claude-opus-4-8' }, trigger: { type: 'refusal', category: 'cyber' } };
+  const client = fakeClient((params, i) => {
+    if (i === 0) return makeMessage([
+      thinking(),
+      toolUse('ask_user', { question: '잘린 질문', why: '', example: '' }, 'partial'),
+      { type: 'text', text: '부분 텍스트' },
+      fallback,
+      toolUse('ask_user', { question: '폴백 모델의 질문', why: '', example: '' }, 'real'),
+    ], { stopReason: 'tool_use', model: 'claude-opus-4-8' });
+    return makeMessage([toolUse('finish_interview', { summary: 's', writer_notes: '' })], { stopReason: 'tool_use' });
+  });
+  const agent = createAgent({ client });
+  const r = await agent.interviewStart(project, {});
+  assert.equal(r.question.question, '폴백 모델의 질문');
+  assert.equal(r.question.toolUseId, 'real');
+  const echoed = project.interview.messages[1].content;
+  assert.deepEqual(echoed.map((b) => b.type), ['text', 'tool_use']);
+  assert.equal(echoed[1].id, 'real');
+  await agent.interviewAnswer(project, '답', {});
+  assert.equal(client.calls[1].messages[2].content[0].tool_use_id, 'real');
+  assert.deepEqual(stripPreFallback([{ type: 'text', text: 'a' }]).length, 1);
+});
+
+test('max_tokens로 잘린 초안은 저장하지 않고 오류를 낸다', async () => {
+  const project = sampleProject();
+  const client = fakeClient(() => makeMessage([text('잘린 본문')], { stopReason: 'max_tokens' }));
+  const agent = createAgent({ client });
+  await assert.rejects(() => agent.complete(project, project.questions[0], {}), (e) => e.code === 'max_tokens');
+  assert.equal(project.answers.q1.versions.length, 0);
+  assert.equal(project.answers.q1.status, 'error');
+});
+
+test('도구 입력 JSON 오류만 재시도하고 다른 오류는 즉시 전달한다', async () => {
+  const project = sampleProject();
+  let n = 0;
+  const jsonErr = Object.assign(new Error('Unable to parse tool parameter JSON from model'), { name: 'AnthropicError' });
+  const client = fakeClient(async () => { n++; if (n === 1) throw jsonErr; return makeMessage([toolUse('finish_interview', { summary: 's', writer_notes: '' })], { stopReason: 'tool_use' }); });
+  const agent = createAgent({ client, isToolJsonError: (e) => e === jsonErr });
+  await agent.interviewStart(project, {});
+  assert.equal(n, 2);
+  const boom = new TypeError('handler bug');
+  const client2 = fakeClient(async () => { throw boom; });
+  const agent2 = createAgent({ client: client2, isToolJsonError: (e) => e === jsonErr });
+  await assert.rejects(() => agent2.interviewStart(sampleProject(), {}), (e) => e === boom);
+  assert.equal(client2.calls.length, 1, '재시도 없음');
+});
+
+test('interviewResume: tool_result 없이 끝난 도구 호출 턴은 버리고 다시 생성한다', async () => {
+  const project = sampleProject();
+  const client = fakeClient((params, i) => {
+    if (i === 0) return makeMessage([toolUse('save_experience', { id: '', title: 'A', situation: '', task: '', action: '', result: '', learned: '', keywords: [], question_ids: ['q1'] }, 's1')], { stopReason: 'tool_use' });
+    if (i === 1) throw Object.assign(new Error('network'), { name: 'APIConnectionError' });
+    return makeMessage([toolUse('ask_user', { question: 'q', why: '', example: '' }, 'a')], { stopReason: 'tool_use' });
+  });
+  const agent = createAgent({ client, isApiError: (e) => e?.name === 'APIConnectionError' });
+  await assert.rejects(() => agent.interviewStart(project, {}));
+  // 저장만 한 턴 뒤 다음 호출이 실패: 히스토리는 [user, assistant(save), user(result)]
+  assert.equal(project.interview.status, 'idle');
+  // 마지막이 user 턴이면 그대로 재요청
+  const r = await agent.interviewResume(project, {});
+  assert.equal(r.type, 'question');
+  // 마지막이 미응답 assistant tool_use 턴인 경우
+  const p2 = sampleProject();
+  p2.interview = { ...p2.interview, status: 'idle', messages: [{ role: 'user', content: 'start' }, { role: 'assistant', content: [toolUse('save_experience', {}, 'x')] }] };
+  const client2 = fakeClient(() => makeMessage([toolUse('finish_interview', { summary: 's', writer_notes: '' })], { stopReason: 'tool_use' }));
+  const agent2 = createAgent({ client: client2 });
+  await agent2.interviewResume(p2, {});
+  assert.equal(client2.calls[0].messages.length, 1, '미응답 assistant 턴 제거 후 재요청');
+});
+
+test('onUsage에 message가 전달된다', async () => {
+  const project = sampleProject();
+  const got = [];
+  const client = fakeClient(() => makeMessage([text('본문')]));
+  const agent = createAgent({ client, onUsage: (u) => got.push(u) });
+  await agent.draft(project, project.questions[0], {});
+  assert.equal(got[0].message.model, 'claude-opus-5-5');
+  assert.equal(got[0].usage.input_tokens, 100);
 });

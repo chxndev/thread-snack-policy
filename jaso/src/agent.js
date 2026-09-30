@@ -111,11 +111,23 @@ function completedAnswers(project, exceptId) {
     .map(({ q, text }) => ({ id: q.id, questionText: q.text, text }));
 }
 
-export function createAgent({ client, settings = {}, onUsage, isApiError = () => false }) {
+/**
+ * 서버 측 폴백이 응답 도중 일어난 경우: 마지막 fallback 블록 앞의 thinking/tool_use 등 모델 내부 블록은
+ * 실행하지도, 되돌려 보내지도 않는다(text 블록과 경계 이후 블록만 유지).
+ */
+export function stripPreFallback(content) {
+  if (!Array.isArray(content)) return [];
+  let last = -1;
+  content.forEach((b, i) => { if (b?.type === 'fallback') last = i; });
+  if (last < 0) return content;
+  return content.filter((b, i) => (i > last ? true : b.type === 'text'));
+}
+
+export function createAgent({ client, settings = {}, onUsage, isApiError = () => false, isToolJsonError = () => false }) {
   const cfg = { ...DEFAULT_SETTINGS, ...settings };
   const eager = !cfg.baseURL; // 프록시 경유 시 eager_input_streaming 생략
 
-  function baseParams({ system, messages, maxTokens = 32000, effort = 'medium', tools, format, autoCache = false }) {
+  function baseParams({ system, messages, maxTokens = 64000, effort = 'medium', tools, format, autoCache = false }) {
     const params = {
       model: cfg.model,
       max_tokens: maxTokens,
@@ -133,6 +145,9 @@ export function createAgent({ client, settings = {}, onUsage, isApiError = () =>
     return params;
   }
 
+  // UI 콜백의 예외가 스트림 오류로 둔갑하지 않도록 감싼다
+  const safe = (fn) => (...args) => { try { fn?.(...args); } catch (e) { console.error('handler error', e); } };
+
   async function call(params, handlers = {}) {
     let jsonRetries = 0;
     for (;;) {
@@ -140,22 +155,22 @@ export function createAgent({ client, settings = {}, onUsage, isApiError = () =>
       const onAbort = () => stream.abort();
       handlers.signal?.addEventListener('abort', onAbort, { once: true });
       let currentTool = null;
-      if (handlers.onText) stream.on('text', handlers.onText);
+      if (handlers.onText) stream.on('text', safe(handlers.onText));
       if (handlers.onToolJson) {
-        stream.on('streamEvent', (ev) => {
+        stream.on('streamEvent', safe((ev) => {
           if (ev.type === 'content_block_start' && ev.content_block?.type === 'tool_use') currentTool = ev.content_block.name;
           if (ev.type === 'content_block_stop') currentTool = null;
-        });
-        stream.on('inputJson', (_partial, snapshot) => handlers.onToolJson(currentTool, snapshot));
+        }));
+        stream.on('inputJson', safe((_partial, snapshot) => handlers.onToolJson(currentTool, snapshot)));
       }
       try {
         const message = await stream.finalMessage();
-        onUsage?.({ model: message.model, usage: message.usage, stopReason: message.stop_reason });
+        try { onUsage?.({ model: message.model, usage: message.usage, stopReason: message.stop_reason, message }); } catch (e) { console.error('usage handler error', e); }
         return message;
       } catch (err) {
         if (handlers.signal?.aborted) throw new AgentError('aborted', '중단했습니다.');
-        // eager 스트리밍에서 도구 입력 JSON을 해석하지 못한 경우만 재시도 (API 오류는 그대로 전달)
-        if (!isApiError(err) && err?.name !== 'APIUserAbortError' && params.tools && jsonRetries++ < 2) continue;
+        // eager 스트리밍에서 SDK가 도구 입력 JSON을 해석하지 못한 경우만 재시도 (API 오류 등은 그대로 전달)
+        if (params.tools && isToolJsonError(err) && jsonRetries++ < 2) continue;
         throw err;
       } finally {
         handlers.signal?.removeEventListener('abort', onAbort);
@@ -170,8 +185,9 @@ export function createAgent({ client, settings = {}, onUsage, isApiError = () =>
       });
     }
     if (message.stop_reason === 'max_tokens') {
-      if (toolTurn) throw new AgentError('max_tokens', '응답이 잘렸습니다(max_tokens). 다시 시도해 주세요.');
-      return 'truncated';
+      throw new AgentError('max_tokens', toolTurn
+        ? '응답이 길이 제한(max_tokens)에 걸려 잘렸습니다. 다시 시도해 주세요.'
+        : '응답이 길이 제한(max_tokens)에 걸려 잘렸습니다. 작성 품질(effort)을 낮추거나 다시 시도해 주세요.');
     }
     return 'ok';
   }
@@ -186,7 +202,7 @@ export function createAgent({ client, settings = {}, onUsage, isApiError = () =>
         messages: iv.messages,
         effort: 'medium',
         tools: INTERVIEW_TOOLS,
-        maxTokens: 16000,
+        maxTokens: 32000,
         autoCache: true,
       });
       const message = await call(params, {
@@ -195,9 +211,10 @@ export function createAgent({ client, settings = {}, onUsage, isApiError = () =>
           if (tool === 'ask_user' && snapshot && typeof snapshot.question === 'string') handlers.onQuestionDelta?.(snapshot.question);
         },
       });
-      const toolUses = message.content.filter((b) => b.type === 'tool_use');
+      const content = stripPreFallback(message.content);
+      const toolUses = content.filter((b) => b.type === 'tool_use');
       checkStop(message, { toolTurn: toolUses.length > 0 });
-      iv.messages.push({ role: 'assistant', content: message.content }); // thinking 블록 포함, 그대로 되돌려 보낸다
+      iv.messages.push({ role: 'assistant', content }); // thinking 블록 포함, 그대로 되돌려 보낸다
 
       if (!toolUses.length) {
         const text = textOf(message).trim();
@@ -286,8 +303,11 @@ export function createAgent({ client, settings = {}, onUsage, isApiError = () =>
     if (iv.pending) { iv.status = 'waiting'; return { type: 'question', question: iv.pending }; }
     if (!iv.messages.length) return interviewStart(project, handlers);
     const last = iv.messages[iv.messages.length - 1];
-    if (last.role !== 'user') {
-      iv.messages.push({ role: 'user', content: '계속 진행하세요. ask_user로 질문하거나 finish_interview로 인터뷰를 마치세요.' });
+    if (last.role === 'assistant') {
+      const unanswered = Array.isArray(last.content) && last.content.some((b) => b.type === 'tool_use');
+      // tool_result 없이 끝난 도구 호출 턴은 되돌려 보낼 수 없으므로 버리고 다시 생성한다(그 앞 히스토리는 그대로)
+      if (unanswered && iv.messages.length > 1) iv.messages.pop();
+      else iv.messages.push({ role: 'user', content: '계속 진행하세요. ask_user로 질문하거나 finish_interview로 인터뷰를 마치세요.' });
     }
     iv.status = 'running';
     return guardedStep(project, handlers);
@@ -348,10 +368,10 @@ export function createAgent({ client, settings = {}, onUsage, isApiError = () =>
   async function critique(project, question, text, handlers = {}) {
     const params = baseParams({
       system: CRITIC_SYSTEM,
-      messages: [{ role: 'user', content: buildCritiqueRequest(project, question, text) }],
+      messages: [{ role: 'user', content: buildCritiqueRequest(project, question, text, { subheading: cfg.subheading }) }],
       effort: 'medium',
       format: CRITIQUE_SCHEMA,
-      maxTokens: 16000,
+      maxTokens: 32000,
     });
     const message = await call(params, { signal: handlers.signal });
     checkStop(message);
@@ -374,7 +394,7 @@ export function createAgent({ client, settings = {}, onUsage, isApiError = () =>
   async function revise(project, question, text, crit, handlers = {}) {
     const params = baseParams({
       system: WRITER_SYSTEM,
-      messages: [{ role: 'user', content: buildReviseRequest(project, question, text, crit, { subheading: cfg.subheading }) }],
+      messages: [{ role: 'user', content: buildReviseRequest(project, question, text, crit, { subheading: cfg.subheading, otherAnswers: completedAnswers(project, question.id) }) }],
       effort: cfg.effort,
     });
     const message = await call(params, { signal: handlers.signal, onText: handlers.onText });
@@ -410,7 +430,7 @@ export function createAgent({ client, settings = {}, onUsage, isApiError = () =>
       messages: [{ role: 'user', content }],
       effort,
       format: schema,
-      maxTokens: 16000,
+      maxTokens: 32000,
     });
     const message = await call(params, { signal });
     checkStop(message);
