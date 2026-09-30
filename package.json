@@ -1,0 +1,18 @@
+{
+  "name": "thread-snack-policy",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Static site: thread-snack policy pages and the 자소서 에이전트 web app",
+  "type": "module",
+  "scripts": {
+    "vendor": "esbuild node_modules/@anthropic-ai/sdk/index.mjs --bundle --format=esm --platform=browser --target=es2022 --minify --outfile=jaso/vendor/anthropic-sdk.mjs --banner:js=\"/* @anthropic-ai/sdk browser bundle - regenerate with: npm run vendor */\"",
+    "test": "node --test \"test/**/*.test.js\"",
+    "serve": "python3 -m http.server 8080",
+    "e2e": "node test/e2e/e2e.mjs"
+  },
+  "devDependencies": {
+    "@anthropic-ai/sdk": "0.129.0",
+    "esbuild": "^0.25.0",
+    "playwright": "^1.56.1"
+  }
+}
