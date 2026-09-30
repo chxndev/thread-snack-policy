@@ -261,9 +261,34 @@ export function createAgent({ client, settings = {}, onUsage, isApiError = () =>
     throw new AgentError('loop', '인터뷰어가 질문 없이 도구 호출만 반복했습니다. 다시 시도해 주세요.');
   }
 
+  /** 인터뷰 턴 실행. 실패·중단 시 status를 idle로 되돌려 interviewResume으로 이어갈 수 있게 한다. */
+  async function guardedStep(project, handlers) {
+    try {
+      return await interviewStep(project, handlers);
+    } catch (err) {
+      const iv = project.interview;
+      if (iv.status === 'running') iv.status = iv.pending ? 'waiting' : 'idle';
+      throw err;
+    }
+  }
+
   async function interviewStart(project, handlers = {}) {
     project.interview = { ...emptyInterview(), status: 'running', messages: [{ role: 'user', content: buildInterviewOpening(project) }] };
-    return interviewStep(project, handlers);
+    return guardedStep(project, handlers);
+  }
+
+  /** 중단·새로고침 뒤 이어서 진행: 마지막 user 턴에 대한 응답을 다시 요청한다(히스토리는 그대로). */
+  async function interviewResume(project, handlers = {}) {
+    const iv = project.interview;
+    if (iv.status === 'done') return { type: 'done', summary: iv.summary };
+    if (iv.pending) { iv.status = 'waiting'; return { type: 'question', question: iv.pending }; }
+    if (!iv.messages.length) return interviewStart(project, handlers);
+    const last = iv.messages[iv.messages.length - 1];
+    if (last.role !== 'user') {
+      iv.messages.push({ role: 'user', content: '계속 진행하세요. ask_user로 질문하거나 finish_interview로 인터뷰를 마치세요.' });
+    }
+    iv.status = 'running';
+    return guardedStep(project, handlers);
   }
 
   function pushUserTurn(iv, text) {
@@ -286,7 +311,7 @@ export function createAgent({ client, settings = {}, onUsage, isApiError = () =>
     if (!text) throw new AgentError('input', '답변을 입력해 주세요.');
     iv.transcript.push({ role: 'user', kind: 'answer', text });
     pushUserTurn(iv, text);
-    return interviewStep(project, handlers);
+    return guardedStep(project, handlers);
   }
 
   async function interviewFinish(project, handlers = {}) {
@@ -295,7 +320,7 @@ export function createAgent({ client, settings = {}, onUsage, isApiError = () =>
     if (iv.status !== 'waiting') throw new AgentError('state', '에이전트가 응답 중입니다. 잠시 후 다시 시도해 주세요.');
     iv.transcript.push({ role: 'user', kind: 'answer', text: '(인터뷰를 여기서 마칠게요)' });
     pushUserTurn(iv, INTERVIEW_FINISH_REQUEST);
-    const res = await interviewStep(project, handlers);
+    const res = await guardedStep(project, handlers);
     if (res.type !== 'done') {
       // 모델이 그래도 질문하면 강제 종료
       iv.pending = null;
@@ -515,7 +540,8 @@ export function createAgent({ client, settings = {}, onUsage, isApiError = () =>
       return ans;
     } catch (err) {
       ans.status = ans.versions.length ? 'done' : 'error';
-      ans.error = err?.message ?? String(err);
+      if (err?.code === 'aborted') { ans.status = ans.versions.length ? 'done' : 'idle'; ans.error = ''; }
+      else ans.error = err?.message ?? String(err);
       throw err;
     }
   }
@@ -557,6 +583,7 @@ export function createAgent({ client, settings = {}, onUsage, isApiError = () =>
   return {
     cfg,
     interviewStart,
+    interviewResume,
     interviewAnswer,
     interviewFinish,
     draft,

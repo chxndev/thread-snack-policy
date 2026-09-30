@@ -23,17 +23,39 @@ function newProject() {
   };
 }
 
+const SAFE_ID = /^[A-Za-z0-9_-]{1,40}$/;
+const safeId = (prefix, id) => (typeof id === 'string' && SAFE_ID.test(id) ? id : uid(prefix));
+
 function normalizeProject(p) {
   const base = newProject();
   if (!p || typeof p !== 'object') return base;
   const out = { ...base, ...p };
   out.profile = { ...base.profile, ...(p.profile ?? {}) };
-  out.questions = Array.isArray(p.questions) ? p.questions : [];
-  out.experiences = Array.isArray(p.experiences) ? p.experiences : [];
+  // 문항 id는 q<번호> 형식만 허용. 바뀐 id는 답변·경험 카드에도 반영한다.
+  const idMap = {};
+  out.questions = (Array.isArray(p.questions) ? p.questions : []).filter((q) => q && typeof q === 'object').map((q, i) => {
+    const id = typeof q.id === 'string' && /^q\d{1,4}$/.test(q.id) ? q.id : `q${i + 1}`;
+    idMap[q.id] = id;
+    return { id, text: String(q.text ?? ''), limit: Math.max(0, Number(q.limit) || 0), mode: q.mode in COUNT_MODES ? q.mode : 'with', type: typeof q.type === 'string' ? q.type : 'competency' };
+  });
+  out.experiences = (Array.isArray(p.experiences) ? p.experiences : []).filter((e) => e && typeof e === 'object').map((e) => ({
+    ...e, id: safeId('exp', e.id),
+    keywords: Array.isArray(e.keywords) ? e.keywords.map(String) : [],
+    questionIds: Array.isArray(e.questionIds) ? e.questionIds.map((x) => idMap[x] ?? x).filter((x) => out.questions.some((q) => q.id === x)) : [],
+  }));
   out.interview = { ...emptyInterview(), ...(p.interview ?? {}) };
+  if (!Array.isArray(out.interview.messages)) out.interview.messages = [];
+  if (!Array.isArray(out.interview.transcript)) out.interview.transcript = [];
   if (out.interview.status === 'running') out.interview.status = out.interview.pending ? 'waiting' : 'idle';
-  out.answers = p.answers && typeof p.answers === 'object' ? p.answers : {};
-  for (const a of Object.values(out.answers)) if (a.status && !['done', 'idle', 'error'].includes(a.status)) a.status = a.versions?.length ? 'done' : 'idle';
+  out.answers = {};
+  if (p.answers && typeof p.answers === 'object') {
+    for (const [k, a] of Object.entries(p.answers)) {
+      const id = idMap[k] ?? k;
+      if (!out.questions.some((q) => q.id === id) || !a || typeof a !== 'object') continue;
+      const versions = (Array.isArray(a.versions) ? a.versions : []).filter((v) => v && typeof v.text === 'string').map((v) => ({ ...v, id: safeId('v', v.id), label: String(v.label ?? '버전') }));
+      out.answers[id] = { versions, currentVersionId: versions.some((v) => v.id === a.currentVersionId) ? a.currentVersionId : versions.at(-1)?.id ?? null, status: versions.length ? 'done' : 'idle', error: '' };
+    }
+  }
   out.usage = { ...base.usage, ...(p.usage ?? {}) };
   if (!['setup', 'interview', 'write', 'done'].includes(out.step)) out.step = 'setup';
   return out;
@@ -265,7 +287,8 @@ function renderInterview() {
   const coverage = state.project.questions.map((q) => ({ q, n: state.project.experiences.filter((e) => e.questionIds?.includes(q.id)).length }));
   let footer = '';
   if (iv.status === 'idle') {
-    footer = `<div class="btn-row end"><button class="btn primary" data-action="start-interview" ${busy ? 'disabled' : ''}>인터뷰 시작</button></div>`;
+    const resumable = iv.messages.length > 0;
+    footer = `<div class="btn-row end">${resumable ? `<span class="small muted">인터뷰가 중단됐습니다. 이어서 진행할 수 있습니다.</span><button class="btn ghost danger" data-action="iv-restart" ${busy ? 'disabled' : ''}>처음부터</button>` : ''}<button class="btn primary" data-action="start-interview" ${busy ? 'disabled' : ''}>${resumable ? '이어서 진행' : '인터뷰 시작'}</button></div>`;
   } else if (iv.status === 'done') {
     footer = `
       <div class="notice ok">인터뷰가 끝났습니다. 경험 카드 ${state.project.experiences.length}개가 준비됐습니다.</div>
@@ -371,7 +394,7 @@ function renderAnswerCard(q) {
     </div>
     <div class="body">
       ${ans?.versions?.length > 1 ? `<div class="versions"><span class="tiny muted">버전:</span>${ans.versions.map((x) => `<button class="v ${x.id === v?.id ? 'current' : ''}" data-action="version-select" data-id="${q.id}" data-vid="${x.id}" title="${x.critique ? `첨삭 ${x.critique.total}점` : ''}">${esc(x.label)}</button>`).join('')}</div>` : ''}
-      <textarea class="answer-text ${state.ui.streamingId === q.id ? 'streaming' : ''}" data-answer="${q.id}" id="answer-${q.id}" placeholder="${rowBusy ? '' : '아직 작성되지 않았습니다. 「이 문항 작성」을 누르세요.'}" ${rowBusy ? 'readonly' : ''}>${esc(text)}</textarea>
+      <textarea class="answer-text ${state.ui.streamingId === q.id ? 'streaming' : ''}" data-answer="${q.id}" id="answer-${q.id}" placeholder="${rowBusy ? '' : '아직 작성되지 않았습니다. 「이 문항 작성」을 누르세요.'}" ${busy ? 'readonly' : ''}>${esc(text)}</textarea>
       <div id="count-${q.id}">${countHtml(q, text)}</div>
       ${text ? `
       <div class="btn-row">${EDIT_PRESETS.map((e) => `<button class="chip" data-action="edit-preset" data-id="${q.id}" data-preset="${e.id}" ${disabled}>${esc(e.label)}</button>`).join('')}</div>
@@ -504,9 +527,13 @@ async function startInterview() {
   state.project.step = 'interview';
   if (iv.status !== 'idle') { save(); render(); return; }
   state.ui.questionStream = '';
+  const resume = iv.messages.length > 0;
   await runTask('interview', async (signal) => {
     const agent = getAgent();
-    await agent.interviewStart(state.project, { ...interviewHandlers(), signal });
+    const res = resume
+      ? await agent.interviewResume(state.project, { ...interviewHandlers(), signal })
+      : await agent.interviewStart(state.project, { ...interviewHandlers(), signal });
+    if (res.type === 'done') toast('인터뷰가 끝났습니다. 경험 카드를 확인하세요.', 'ok');
   });
 }
 
@@ -756,6 +783,7 @@ const actions = {
   'iv-skip': () => sendAnswer(INTERVIEW_SKIP_ANSWER),
   'iv-finish': () => finishInterview(),
   'iv-restart': () => { if (!confirm('인터뷰 대화를 지우고 처음부터 다시 할까요? (경험 카드는 유지됩니다)')) return; state.project.interview = emptyInterview(); save(); startInterview(); },
+  'iv-resume': () => startInterview(),
   'go-write': () => { state.project.step = 'write'; save(); render(); },
   'go-done': () => { state.project.step = 'done'; save(); render(); },
   'stop': () => { state.ui.abort?.abort(); },

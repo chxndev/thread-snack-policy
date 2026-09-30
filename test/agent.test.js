@@ -214,3 +214,49 @@ test('중단(signal)하면 AgentError(aborted)', async () => {
   const agent = createAgent({ client });
   await assert.rejects(() => agent.draft(project, project.questions[0], { signal: ctrl.signal }), (e) => e.code === 'aborted');
 });
+
+test('인터뷰 중단 후 interviewResume이 마지막 user 턴을 다시 보내 이어간다', async () => {
+  const project = sampleProject();
+  const ctrl = new AbortController();
+  let calls = 0;
+  const client = fakeClient(async (params, i) => {
+    calls++;
+    if (i === 0) return makeMessage([toolUse('ask_user', { question: 'q1', why: '', example: '' }, 'a')], { stopReason: 'tool_use' });
+    if (i === 1) { ctrl.abort(); return makeMessage([text('x')]); } // 답변 전송 중 중단
+    if (i === 2) return makeMessage([toolUse('ask_user', { question: 'q2', why: '', example: '' }, 'b')], { stopReason: 'tool_use' });
+  });
+  const agent = createAgent({ client });
+  await agent.interviewStart(project, {});
+  await assert.rejects(() => agent.interviewAnswer(project, '답변', { signal: ctrl.signal }), (e) => e.code === 'aborted');
+  assert.equal(project.interview.status, 'idle', '중단 후 재개 가능한 상태');
+  assert.equal(project.interview.messages.at(-1).role, 'user', '히스토리는 user 턴으로 끝남');
+  const r = await agent.interviewResume(project, {});
+  assert.equal(r.type, 'question');
+  assert.equal(r.question.question, 'q2');
+  assert.equal(project.interview.status, 'waiting');
+  // 재개 요청은 같은 히스토리(첫 질문 + 답변 tool_result)를 그대로 다시 보낸다
+  assert.equal(client.calls[2].messages.length, 3);
+  assert.equal(client.calls[2].messages[2].content[0].tool_use_id, 'a');
+  assert.equal(calls, 3);
+});
+
+test('interviewResume: pending 질문이 있으면 API 호출 없이 waiting으로 복구', async () => {
+  const project = sampleProject();
+  const client = fakeClient(() => makeMessage([toolUse('ask_user', { question: 'q1', why: '', example: '' }, 'a')], { stopReason: 'tool_use' }));
+  const agent = createAgent({ client });
+  await agent.interviewStart(project, {});
+  project.interview.status = 'idle'; // 새로고침으로 running→idle 된 상황
+  const r = await agent.interviewResume(project, {});
+  assert.equal(r.type, 'question');
+  assert.equal(client.calls.length, 1);
+});
+
+test('complete 중단 시 오류 메시지를 남기지 않는다', async () => {
+  const project = sampleProject();
+  const ctrl = new AbortController();
+  const client = fakeClient(async () => { ctrl.abort(); return makeMessage([text('x')]); });
+  const agent = createAgent({ client });
+  await assert.rejects(() => agent.complete(project, project.questions[0], { signal: ctrl.signal }), (e) => e.code === 'aborted');
+  assert.equal(project.answers.q1.status, 'idle');
+  assert.equal(project.answers.q1.error, '');
+});
