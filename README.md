@@ -53,6 +53,16 @@ npm run serve        # http://localhost:8080/jaso/
 
 첫 화면의 **설정**에서 Anthropic API 키를 입력하세요. 키는 이 브라우저의 `sessionStorage`(기본) 또는 체크 시 `localStorage`에만 저장되며 `api.anthropic.com`으로만 전송됩니다. 공용 PC에서는 저장 옵션을 켜지 마세요. 프록시를 쓰려면 설정의 Base URL을 바꾸면 됩니다.
 
+### WSL2에서 localhost 서버를 상시 실행하기 (API 키 모드)
+
+`deploy/wsl/`에 systemd 유닛과 설치 스크립트가 있습니다. 이 서버는 **API 키 모드** 페이지를 띄우는 용도이며, claude.ai 구독으로 쓰는 아티팩트 버전은 claude.ai가 호스팅하므로 서버가 필요 없습니다.
+
+1. WSL에서 systemd 켜기: `/etc/wsl.conf`에 `[boot]` 아래 `systemd=true`를 넣고 Windows에서 `wsl --shutdown` 후 다시 엽니다.
+2. WSL에서 `bash deploy/wsl/install.sh` 실행 → `jaso.service`가 등록되고 `http://localhost:8080/jaso/`가 열립니다(127.0.0.1에만 바인딩).
+3. WSL VM이 유휴 상태에서 꺼지지 않도록 Windows에서 `powershell -ExecutionPolicy Bypass -File deploy\wsl\register-keepalive.ps1`를 한 번 실행합니다. 로그온할 때마다 창 없는 `wsl.exe` 프로세스 하나를 유지해 VM을 살려 둡니다(화면 잠금은 괜찮고, 로그아웃하면 멈춥니다).
+
+로그는 `journalctl -u jaso -f`, 중지는 `sudo systemctl disable --now jaso`입니다. 다른 기기에서 접속하려면 `.wslconfig`의 `networkingMode=mirrored`(Windows 11) 또는 `netsh interface portproxy`가 추가로 필요합니다.
+
 ### 개발
 
 ```bash

@@ -1,0 +1,18 @@
+# 자소서 에이전트 정적 서버 — WSL2(systemd) 백그라운드 서비스
+# install.sh가 __USER__/__DIR__ 자리를 채워 /etc/systemd/system/jaso.service 로 설치합니다.
+[Unit]
+Description=jaso static server (http://127.0.0.1:8080/jaso/)
+After=network.target
+
+[Service]
+Type=simple
+User=__USER__
+WorkingDirectory=__DIR__
+# 저장소 루트를 서빙: /jaso/ 가 앱. 127.0.0.1에만 바인딩(외부 노출 없음).
+ExecStart=/usr/bin/python3 -m http.server 8080 --bind 127.0.0.1 --directory __DIR__
+Restart=always
+RestartSec=3
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target
