@@ -6,10 +6,11 @@
   "type": "module",
   "scripts": {
     "vendor": "esbuild node_modules/@anthropic-ai/sdk/index.mjs --bundle --format=esm --platform=browser --target=es2022 --minify --outfile=jaso/vendor/anthropic-sdk.mjs --banner:js=\"/* @anthropic-ai/sdk browser bundle - regenerate with: npm run vendor */\"",
+    "start": "node jaso/server/server.mjs",
     "test": "node --test \"test/**/*.test.js\"",
     "serve": "python3 -m http.server 8080",
     "pree2e": "playwright install chromium",
-    "e2e": "node test/e2e/e2e.mjs && node test/e2e/e2e-artifact.mjs",
+    "e2e": "node test/e2e/e2e.mjs && node test/e2e/e2e-artifact.mjs && node test/e2e/e2e-server.mjs",
     "build:artifact": "node scripts/build-artifact.mjs"
   },
   "devDependencies": {

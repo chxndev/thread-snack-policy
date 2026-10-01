@@ -1,6 +1,8 @@
 // claude.ai 아티팩트 제공자: 보는 사람의 claude.ai 구독(Team/Pro 등)으로 Claude를 호출한다.
 // window.claude.use('sample')이 주는 함수를 받는다. 시스템 프롬프트·도구 호출이 없으므로
 // 지시는 프롬프트 앞에 붙이고, 인터뷰는 JSON 턴으로 진행한다.
+// 운영자 구독 서버의 함수(llm-remote.js createRemoteSample)도 같은 모양이라 그대로 받는다.
+// 그 함수는 acceptsSchema=true 이므로 json 호출에 schema를 함께 넘겨 서버가 구조화 출력을 쓰게 한다.
 import { INTERVIEWER_SYSTEM, buildInterviewOpening, INTERVIEW_JSON_FORMAT, INTERVIEW_REPLY_SCHEMA, INTERVIEW_FINISH_REQUEST, composePrompt, jsonFormatInstruction } from './prompts.js';
 import { validateSchema } from './text.js';
 import { AgentError } from './errors.js';
@@ -21,6 +23,13 @@ export const SAMPLE_ERROR_TEXT = {
   upstream_error: '일시적인 오류입니다. 잠시 후 다시 시도해 주세요.',
   invalid_request: '요청 형식 오류입니다(페이지 버그). 새로고침 후 다시 시도해 주세요.',
   tools_unavailable: '이 보기에서는 도구 호출을 쓸 수 없습니다.',
+  // 운영자 구독 서버(llm-remote) 오류 코드 — 서버가 보낸 문구가 있으면 그것을 우선한다
+  unauthorized: '접속 키가 올바르지 않습니다.',
+  busy: '지금 다른 요청을 처리하고 있습니다. 잠시 후 다시 시도해 주세요.',
+  nologin: '운영자의 Claude 로그인이 만료되었거나 설정되지 않았습니다. 운영자에게 알려 주세요.',
+  usage_limit: '운영자 Claude 구독의 사용량 한도에 걸렸습니다. 잠시 후 다시 시도해 주세요.',
+  timeout: '응답이 너무 오래 걸립니다. 운영자의 Claude 로그인 상태를 확인해야 할 수 있습니다.',
+  network: '서버에 연결할 수 없습니다. 운영자의 PC나 터널이 꺼져 있을 수 있습니다.',
 };
 
 function toAgentError(e) {
@@ -29,7 +38,13 @@ function toAgentError(e) {
   if (code === 'cancelled') return new AgentError('aborted', '중단했습니다.');
   if (code === 'refused') return new AgentError('refusal', SAMPLE_ERROR_TEXT.refused);
   if (code === 'invalid_json') return new AgentError('parse', SAMPLE_ERROR_TEXT.invalid_json, { detail: e.text ?? '' });
-  if (code && SAMPLE_ERROR_TEXT[code]) return new AgentError(code, SAMPLE_ERROR_TEXT[code], { detail: e.message ?? '' });
+  if (code && SAMPLE_ERROR_TEXT[code]) {
+    // 운영자 서버가 보낸 한국어 문구(예: 한도 해제 시각 포함)가 있으면 기본 문구보다 우선한다
+    const serverMessage = typeof e.message === 'string' && /[가-힣]/.test(e.message) ? e.message : '';
+    const extra = { detail: e.message ?? '' };
+    for (const k of ['status', 'resetsAt', 'retryAfterSec']) if (e[k] != null) extra[k] = e[k];
+    return new AgentError(code, serverMessage || SAMPLE_ERROR_TEXT[code], extra);
+  }
   if (e instanceof Error) return e;
   return new AgentError('upstream_error', SAMPLE_ERROR_TEXT.upstream_error, { detail: e?.message ?? String(e) });
 }
@@ -42,13 +57,13 @@ export function peekQuestion(text) {
 }
 
 /**
- * @param {Function} sample  claude.use('sample')의 결과 (sample(input, opts), sample.json(input, opts))
+ * @param {Function} sample  claude.use('sample')의 결과 또는 createRemoteSample() (sample(input, opts), sample.json(input, opts); acceptsSchema면 json에 schema 전달)
  */
 export function createSampleProvider({ sample, cfg, onUsage }) {
   const tierFor = (role) => (role === 'writer' ? (cfg.tier || 'complex') : 'default');
 
-  async function run(fn, { role, signal, onText, onRaw }) {
-    const opts = { modelTier: tierFor(role), cache: false };
+  async function run(fn, { role, signal, onText, onRaw, extra }) {
+    const opts = { modelTier: tierFor(role), cache: false, ...extra }; // extra: 제공자별 추가 옵션(서버 모드의 schema 등)
     if (signal) opts.signal = signal;
     if (onText || onRaw) {
       let prev = '';
@@ -75,7 +90,7 @@ export function createSampleProvider({ sample, cfg, onUsage }) {
 
   async function json({ system, user, schema, role = 'critic', signal, label = '결과' }) {
     const prompt = composePrompt(system, user) + jsonFormatInstruction(schema);
-    const parsed = await run((opts) => sample.json(prompt, opts), { role, signal });
+    const parsed = await run((opts) => sample.json(prompt, opts), { role, signal, extra: sample.acceptsSchema ? { schema } : undefined });
     if (parsed === null || typeof parsed !== 'object') throw new AgentError('parse', `${label}(JSON)를 해석하지 못했습니다.`);
     return parsed;
   }
@@ -103,6 +118,7 @@ export function createSampleProvider({ sample, cfg, onUsage }) {
       const reply = await run((opts) => sample.json(iv.messages.map((m) => ({ role: m.role, content: m.content })), opts), {
         role: 'interviewer',
         signal: handlers.signal,
+        extra: sample.acceptsSchema ? { schema: INTERVIEW_REPLY_SCHEMA } : undefined,
         onRaw: (t) => { raw = t; const q = peekQuestion(t); if (q) handlers.onQuestionDelta?.(q); },
       });
       iv.messages.push({ role: 'assistant', content: raw && raw.trim() ? raw : JSON.stringify(reply) });

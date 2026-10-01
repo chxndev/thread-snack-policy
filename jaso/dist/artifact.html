@@ -42,6 +42,7 @@ h1, h2, h3, h4 { margin: 0; line-height: 1.3; }
 p { margin: 0 0 .6rem; }
 code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .9em; background: rgba(128,128,128,.14); padding: .05em .35em; border-radius: 3px; }
 .hidden { display: none !important; }
+[hidden] { display: none !important; } /* .btn 등 display를 지정한 요소에도 hidden 속성이 먹게 한다 (설정 대화상자의 모드별 버튼) */
 .muted { color: var(--ink2); }
 .small { font-size: .85rem; }
 .tiny { font-size: .78rem; }
@@ -222,6 +223,8 @@ footer.site { text-align: center; color: var(--ink3); font-size: .78rem; padding
 #confirm-dialog .dlg-body { padding: 1rem 1.1rem; }
 #confirm-dialog p { white-space: pre-wrap; }
 .runtime-badge { font-size: .72rem; color: var(--ink3); border: 1px solid var(--rule); border-radius: 999px; padding: .1rem .5rem; }
+.runtime-badge.server { border-color: var(--accent); color: var(--accent); }
+.notice b { font-weight: 600; }
 
 </style>
 <header class="topbar">
@@ -244,7 +247,15 @@ footer.site { text-align: center; color: var(--ink3); font-size: .78rem; padding
   <form method="dialog" class="dlg-body" id="settings-form">
     <h2>설정</h2>
     <div class="notice info small" data-mode="artifact" hidden>이 페이지는 claude.ai 안에서 실행 중이며, 보는 사람의 claude.ai 구독 사용량으로 Claude를 호출합니다. API 키가 필요 없습니다.</div>
-    <div data-mode="artifact" hidden>
+    <div class="notice info small" data-mode="server" hidden>이 페이지는 운영자의 PC에서 운영자의 claude.ai 구독으로 Claude를 호출합니다. 입력한 내용은 운영자의 서버를 거쳐 Claude로 전달되며 서버에 저장되지는 않습니다.</div>
+    <div data-mode="server" hidden>
+      <div class="field">
+        <label for="s-accesskey">접속 키</label>
+        <input type="password" id="s-accesskey" name="accessKey" autocomplete="off" placeholder="운영자에게 받은 접속 키">
+        <span class="hint">이 브라우저에만 저장됩니다.</span>
+      </div>
+    </div>
+    <div data-mode="artifact server" hidden>
       <div class="field">
         <label for="s-tier">작성 모델 등급</label>
         <select id="s-tier" name="tier"></select>
@@ -303,6 +314,7 @@ footer.site { text-align: center; color: var(--ink3); font-size: .78rem; padding
     <div class="usage" id="s-usage"></div>
     <div class="btn-row end" style="margin-top:1rem">
       <button type="button" class="btn ghost danger" data-action="clear-key" data-mode="api">키 삭제</button>
+      <button type="button" class="btn ghost danger" data-action="clear-access-key" data-mode="server" hidden>접속 키 삭제</button>
       <button type="button" class="btn" data-action="close-settings">취소</button>
       <button type="submit" class="btn primary">저장</button>
     </div>

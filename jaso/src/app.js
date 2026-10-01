@@ -3,6 +3,7 @@ import { MODELS, EFFORTS, TIERS, describeError, costFromMessage } from './api.js
 import { createAgent, DEFAULT_SETTINGS, emptyInterview, ensureAnswer, currentText, currentVersion, upsertExperience, addVersion } from './agent.js';
 import { createSdkClient } from './llm-sdk.js';
 import { createSampleProvider } from './llm-sample.js';
+import { createRemoteSample } from './llm-remote.js';
 import { storage } from './storage.js';
 import { COMMON_QUESTIONS, COMPANY_PRESETS } from './presets.js';
 import { QUESTION_TYPES, EDIT_PRESETS, SCORE_LABELS, INTERVIEW_SKIP_ANSWER, CRITIQUE_SCHEMA, computeTotal } from './prompts.js';
@@ -113,10 +114,13 @@ function normalizeProject(p) {
   return out;
 }
 
-// 실행 환경: claude.ai 아티팩트(구독 사용량으로 Claude 호출) 또는 일반 웹(API 키)
+// 실행 환경: claude.ai 아티팩트(보는 사람의 구독) / 운영자 구독 서버(같은 곳의 ../api/) / 일반 웹(API 키)
+const IS_ARTIFACT = typeof window !== 'undefined' && !!window.claude && typeof window.claude.use === 'function';
 const RUNTIME = {
-  artifact: typeof window !== 'undefined' && !!window.claude && typeof window.claude.use === 'function',
+  artifact: IS_ARTIFACT,
   sample: null, downloads: null, checked: false, sdk: null,
+  server: false, serverInfo: null, remote: null,
+  checking: !IS_ARTIFACT, // 일반 웹에서는 ../api/health 확인이 끝날 때까지 true
 };
 
 const state = {
@@ -124,6 +128,7 @@ const state = {
   settings: { ...DEFAULT_SETTINGS, ...storage.loadSettings() },
   apiKey: storage.loadApiKey(),
   persistKey: storage.hasPersistedApiKey(),
+  accessKey: storage.loadAccessKey(),
   ui: { busy: null, abort: null, questionStream: '', stageLog: {}, streamingId: null },
 };
 
@@ -165,19 +170,96 @@ async function getAgent() {
     const cfg = { ...DEFAULT_SETTINGS, ...state.settings };
     return createAgent({ provider: createSampleProvider({ sample: RUNTIME.sample, cfg, onUsage }), settings: state.settings, onUsage });
   }
+  if (RUNTIME.checking) throw Object.assign(new Error('연결을 확인하는 중입니다. 잠시 후 다시 시도하세요.'), { code: 'norun' });
+  if (RUNTIME.server) {
+    if (RUNTIME.serverInfo?.auth === 'key' && !state.accessKey) throw Object.assign(new Error('접속 키를 먼저 입력하세요.'), { code: 'noaccess' });
+    const cfg = { ...DEFAULT_SETTINGS, ...state.settings };
+    return createAgent({ provider: createSampleProvider({ sample: RUNTIME.remote, cfg, onUsage }), settings: state.settings, onUsage });
+  }
   if (!state.apiKey) throw Object.assign(new Error('API 키를 먼저 설정하세요.'), { code: 'nokey' });
   RUNTIME.sdk = await createSdkClient({ apiKey: state.apiKey, baseURL: state.settings.baseURL });
   return createAgent({ client: RUNTIME.sdk.client, settings: state.settings, isApiError: RUNTIME.sdk.isApiError, isToolJsonError: RUNTIME.sdk.isToolJsonError, onUsage });
 }
 
 async function initRuntime() {
-  if (!RUNTIME.artifact) return;
-  try {
-    RUNTIME.sample = await window.claude.use('sample');
-    RUNTIME.downloads = await window.claude.use('downloads');
-  } catch (e) { console.error(e); }
+  if (RUNTIME.artifact) {
+    try {
+      RUNTIME.sample = await window.claude.use('sample');
+      RUNTIME.downloads = await window.claude.use('downloads');
+    } catch (e) { console.error(e); }
+    RUNTIME.checked = true;
+    render();
+    return;
+  }
+  // 일반 웹: 같은 곳에 운영자 구독 서버가 있는지 확인한다. 없으면(정적 호스팅의 404, 네트워크 오류 등) 지금까지처럼 API 키 모드.
+  const info = await probeServer();
+  if (info) {
+    RUNTIME.server = true;
+    RUNTIME.serverInfo = info;
+    RUNTIME.remote = createRemoteSample({ getKey: () => state.accessKey });
+  }
+  RUNTIME.checking = false;
   RUNTIME.checked = true;
+  renderChrome();
   render();
+  if (!RUNTIME.server && !hasApiKey() && !state.project.questions.length) setTimeout(() => toast('먼저 설정에서 Anthropic API 키를 입력하세요.'), 300);
+}
+
+/** GET ../api/health (4초 제한). jaso 서버의 응답이면 그 JSON을, 아니면 null */
+async function probeServer() {
+  const json = await fetchJsonQuietly(new URL('../api/health', location.href).href, 4000);
+  return json && json.service === 'jaso' && json.runtime === 'server' ? json : null;
+}
+
+/**
+ * JSON을 조용히 가져온다. 프레임에서 받은 4xx 응답은 브라우저가 콘솔에 오류로 찍기 때문에(정적 호스팅에서는 ../api/health가 404)
+ * Worker 안에서 fetch한다 — 워커가 받은 응답은 콘솔에 남지 않는다. Worker를 쓸 수 없으면(CSP 등) 프레임에서 직접 요청한다.
+ * 실패·시간 초과·JSON이 아닌 응답은 모두 null.
+ */
+function fetchJsonQuietly(url, timeoutMs) {
+  const init = { headers: { Accept: 'application/json' }, cache: 'no-store' };
+  const direct = async (signal) => {
+    try {
+      const res = await fetch(url, { ...init, signal });
+      const text = await res.text();
+      return res.ok ? JSON.parse(text) : null;
+    } catch { return null; }
+  };
+  return new Promise((resolve) => {
+    const ctl = new AbortController();
+    let worker = null;
+    let blobUrl = '';
+    let settled = false;
+    const done = (v) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      ctl.abort();
+      try { worker?.terminate(); } catch { /* 이미 종료 */ }
+      if (blobUrl) URL.revokeObjectURL(blobUrl);
+      resolve(v ?? null);
+    };
+    const timer = setTimeout(() => done(null), timeoutMs);
+    try {
+      // 본문은 항상 끝까지 읽는다: 읽지 않은 응답은 브라우저가 "로딩 중"으로 남겨 두어 워커를 끝내도 정리되지 않는다(네트워크 유휴 판정이 막힘)
+      const src = `self.onmessage = async (e) => { let v = null; try { const r = await fetch(e.data, ${JSON.stringify(init)}); const t = await r.text(); if (r.ok) v = JSON.parse(t); } catch { v = null; } postMessage(v); };`;
+      blobUrl = URL.createObjectURL(new Blob([src], { type: 'text/javascript' }));
+      worker = new Worker(blobUrl);
+      worker.onmessage = (e) => done(e.data);
+      worker.onerror = () => direct(ctl.signal).then(done);
+      worker.postMessage(url);
+    } catch {
+      direct(ctl.signal).then(done);
+    }
+  });
+}
+
+/** 작업이 끝난 뒤 서버 상태(로그인·사용량 창)를 가볍게 다시 읽어 사이드바를 갱신한다 (실패는 무시) */
+function refreshServerInfo() {
+  if (!RUNTIME.server || !RUNTIME.remote) return;
+  RUNTIME.remote.health().then((info) => {
+    if (info && info.service === 'jaso') { RUNTIME.serverInfo = info; renderSide(); }
+  }).catch(() => {});
 }
 
 /** 비동기 작업 래퍼: busy 표시, 중단 컨트롤러, 오류 토스트, 저장·렌더 */
@@ -190,8 +272,10 @@ async function runTask(label, fn, { rerender = true } = {}) {
     return await fn(state.ui.abort.signal);
   } catch (err) {
     if (err?.code === 'nokey') { toast(err.message, 'bad'); openSettings(); }
+    else if (err?.code === 'noaccess') { toast(err.message, 'bad'); openSettings({ focus: '#s-accesskey' }); }
     else if (err?.code === 'norun') toast(err.message, 'bad');
     else if (err?.code === 'aborted' || err?.name === 'APIUserAbortError') toast('중단했습니다.');
+    else if (err?.name === 'AgentError' && err.code === 'unauthorized') { toast(err.message, 'bad'); openSettings({ focus: '#s-accesskey' }); }
     else { console.error(err); toast(describeError(err, RUNTIME.sdk?.describeError), 'bad'); }
     return null;
   } finally {
@@ -200,6 +284,7 @@ async function runTask(label, fn, { rerender = true } = {}) {
     state.ui.streamingId = null;
     save();
     render();
+    if (RUNTIME.server) refreshServerInfo();
   }
 }
 
@@ -212,7 +297,16 @@ function addQuestion(tpl = {}) {
   state.project.questions.push({ id: nextQuestionId(), text: tpl.text ?? '', limit: tpl.limit ?? 1000, mode: tpl.mode ?? 'with', type: tpl.type ?? 'competency' });
 }
 
-function hasApiKey() { return RUNTIME.artifact ? !!RUNTIME.sample : !!state.apiKey; }
+/** 구독으로 호출하는 환경(아티팩트 또는 운영자 서버): 토큰·비용 대신 호출 수·등급을 보여 준다 */
+function isSubscription() { return RUNTIME.artifact || RUNTIME.server; }
+const subscriptionLabel = () => (RUNTIME.artifact ? 'claude.ai 구독' : '운영자 구독');
+
+/** Claude를 호출할 준비가 됐는지: 아티팩트는 sample 연결, 서버는 접속 키(또는 개방 모드), 일반 웹은 API 키 */
+function hasApiKey() {
+  if (RUNTIME.artifact) return !!RUNTIME.sample;
+  if (RUNTIME.server) return RUNTIME.serverInfo?.auth === 'open' || !!state.accessKey;
+  return !!state.apiKey;
+}
 
 /** 아티팩트 뷰어는 confirm()을 지원하지 않으므로 페이지 안의 대화상자로 묻는다 */
 function askConfirm(message, { ok = '확인', danger = false } = {}) {
@@ -295,6 +389,13 @@ function renderStage() {
 }
 
 function keyNotice() {
+  if (RUNTIME.checking) return '<div class="notice info"><span class="spinner"></span> 연결을 확인하고 있습니다…</div>';
+  if (RUNTIME.server) {
+    const parts = [];
+    if (!hasApiKey()) parts.push('<div class="notice">이 페이지는 운영자의 Claude 구독으로 동작합니다. 운영자에게 받은 <b>접속 키</b>를 입력하세요. <button class="btn sm" data-action="open-settings">설정에서 키 입력</button></div>');
+    if (RUNTIME.serverInfo?.login?.ok === false) parts.push('<div class="notice bad">운영자의 Claude 로그인이 끊겨 있어 지금은 작성할 수 없습니다. 운영자에게 알려 주세요.</div>');
+    return parts.join('');
+  }
   if (hasApiKey()) return '';
   if (RUNTIME.artifact) {
     return RUNTIME.checked
@@ -474,7 +575,7 @@ function renderWrite() {
   return `
   <div class="card">
     <div class="card-head">
-      <div><h2>3. 작성·첨삭</h2><div class="card-title-sub">문항마다 초안 → 인사담당자 첨삭 → 수정 → 글자수 조정을 자동으로 돌립니다. ${RUNTIME.artifact ? `claude.ai 구독, 작성 등급 ${esc(state.settings.tier ?? 'complex')}` : `모델 ${esc(MODELS.find((m) => m.id === state.settings.model)?.label ?? state.settings.model)}, 품질 ${esc(state.settings.effort)}`}.</div></div>
+      <div><h2>3. 작성·첨삭</h2><div class="card-title-sub">문항마다 초안 → 인사담당자 첨삭 → 수정 → 글자수 조정을 자동으로 돌립니다. ${isSubscription() ? `${subscriptionLabel()}, 작성 등급 ${esc(state.settings.tier ?? 'complex')}` : `모델 ${esc(MODELS.find((m) => m.id === state.settings.model)?.label ?? state.settings.model)}, 품질 ${esc(state.settings.effort)}`}.</div></div>
       <div class="btn-row">
         ${busy ? `<button class="btn" data-action="stop">중단</button>` : `<button class="btn primary" data-action="write-all" ${!p.questions.length ? 'disabled' : ''}>${pendingCount ? `남은 ${pendingCount}문항 완성하기` : '전체 다시 생성'}</button>`}
       </div>
@@ -580,10 +681,10 @@ function renderSide() {
       </div>`).join('') : '<div class="empty">인터뷰를 진행하면 자동으로 쌓입니다. 직접 추가할 수도 있습니다.</div>'}
   </div>
   <div class="card">
-    <h3 style="font-size:.95rem;margin-bottom:.4rem">사용량 ${RUNTIME.artifact ? '<span class="muted small">(claude.ai 구독)</span>' : '<span class="muted small">(추정)</span>'}</h3>
+    <h3 style="font-size:.95rem;margin-bottom:.4rem">사용량 ${isSubscription() ? `<span class="muted small">(${subscriptionLabel()})</span>` : '<span class="muted small">(추정)</span>'}</h3>
     <div class="usage">
       <span>호출</span><b>${fmtNum(u.calls)}</b>
-      ${RUNTIME.artifact ? `<span>최근 등급</span><b>${esc((u.lastTier ?? '').replace('claude.ai/', '') || '-')}</b>` : `
+      ${isSubscription() ? `<span>최근 등급</span><b>${esc((u.lastTier ?? '').replace('claude.ai/', '') || '-')}</b>${usageWindowRows()}` : `
       <span>입력 토큰</span><b>${fmtNum(u.input)}</b>
       <span>캐시 읽기</span><b>${fmtNum(u.cacheRead)}</b>
       <span>출력 토큰</span><b>${fmtNum(u.output)}</b>
@@ -592,9 +693,22 @@ function renderSide() {
     ${busy ? `<div class="stage-log" style="margin-top:.5rem"><span class="spinner"></span> ${esc(busyLabel())}</div>` : ''}
   </div>`;
   const su = $('#s-usage');
-  if (su) su.innerHTML = RUNTIME.artifact
-    ? `<span>호출</span><b>${fmtNum(u.calls)}</b><span>과금</span><b>claude.ai 구독 사용량</b>`
+  if (su) su.innerHTML = isSubscription()
+    ? `<span>호출</span><b>${fmtNum(u.calls)}</b><span>과금</span><b>${subscriptionLabel()} 사용량</b>`
     : `<span>호출</span><b>${fmtNum(u.calls)}</b><span>입력/출력 토큰</span><b>${fmtNum(u.input)} / ${fmtNum(u.output)}</b><span>비용(추정)</span><b>$${(u.costUsd || 0).toFixed(3)}</b>`;
+}
+
+const WINDOW_LABELS = { five_hour: '5시간', seven_day: '주간', weekly: '주간' };
+const fmtTime = (ms) => new Date(ms).toLocaleString('ko-KR', { month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+
+/** 서버 모드: 운영자 구독의 사용량 창(5시간 등) 상태 행. health의 usageWindow가 없으면 빈 문자열 */
+function usageWindowRows() {
+  const w = RUNTIME.server ? RUNTIME.serverInfo?.usageWindow : null;
+  if (!w || typeof w !== 'object') return '';
+  const status = w.status === 'allowed' ? '정상' : w.status === 'allowed_warning' ? '경고(한도 임박)' : w.status === 'rejected' ? '한도 초과' : esc(String(w.status ?? '-'));
+  const type = WINDOW_LABELS[w.type] ?? (w.type ? esc(String(w.type)) : '');
+  const reset = Number(w.resetsAt) ? ` · ${fmtTime(Number(w.resetsAt) * 1000)} 초기화` : '';
+  return `<span>사용량 창${type ? ` <span class="tiny muted">(${type})</span>` : ''}</span><b>${status}${reset}</b>`;
 }
 
 function busyLabel() {
@@ -713,6 +827,8 @@ async function writeQuestions(questions) {
         await agent.complete(state.project, q, writeHandlers(q, signal));
       } catch (err) {
         if (err?.code === 'aborted' || err?.name === 'APIUserAbortError') throw err;
+        // 접속 키·로그인·한도·연결 문제는 다음 문항도 똑같이 실패하므로 묶음 작업을 멈춘다
+        if (['unauthorized', 'nologin', 'usage_limit', 'network'].includes(err?.code)) throw err;
         console.error(err);
         toast(`${q.id}: ${describeError(err)}`, 'bad');
       } finally {
@@ -823,11 +939,16 @@ async function importProject(file) {
 
 // ───────────────────────────── 대화상자 ─────────────────────────────
 
-function openSettings() {
+function currentMode() { return RUNTIME.artifact ? 'artifact' : RUNTIME.server ? 'server' : 'api'; }
+
+function openSettings({ focus = null } = {}) {
   const d = $('#settings-dialog');
-  for (const el of d.querySelectorAll('[data-mode]')) el.hidden = el.dataset.mode !== (RUNTIME.artifact ? 'artifact' : 'api');
+  const mode = currentMode();
+  // data-mode는 공백으로 구분된 여러 모드를 담을 수 있다 (예: "artifact server")
+  for (const el of d.querySelectorAll('[data-mode]')) el.hidden = !el.dataset.mode.split(/\s+/).includes(mode);
   $('#s-tier').innerHTML = TIERS.map((t) => `<option value="${t.id}" ${t.id === (state.settings.tier ?? 'complex') ? 'selected' : ''}>${esc(t.label)}</option>`).join('');
   $('#s-apikey').value = state.apiKey;
+  $('#s-accesskey').value = state.accessKey;
   $('#s-persist').checked = state.persistKey;
   $('#s-model').innerHTML = MODELS.map((m) => `<option value="${m.id}" ${m.id === state.settings.model ? 'selected' : ''}>${esc(m.label)} — ${esc(m.note)}</option>`).join('');
   $('#s-effort').innerHTML = EFFORTS.map((e) => `<option value="${e.id}" ${e.id === state.settings.effort ? 'selected' : ''}>${esc(e.label)}</option>`).join('');
@@ -837,6 +958,7 @@ function openSettings() {
   $('#s-baseurl').value = state.settings.baseURL ?? '';
   renderSide();
   d.showModal();
+  if (focus) $(focus)?.focus();
 }
 
 function saveSettingsFromForm() {
@@ -845,6 +967,10 @@ function saveSettingsFromForm() {
   state.apiKey = key;
   state.persistKey = f.persistKey.checked;
   storage.saveApiKey(key, state.persistKey);
+  if (RUNTIME.server) {
+    state.accessKey = f.accessKey.value.trim();
+    storage.saveAccessKey(state.accessKey);
+  }
   state.settings = {
     ...state.settings,
     model: f.model.value,
@@ -890,6 +1016,7 @@ const actions = {
   'open-settings': () => openSettings(),
   'close-settings': () => $('#settings-dialog').close(),
   'clear-key': () => { state.apiKey = ''; state.persistKey = false; storage.clearApiKey(); $('#s-apikey').value = ''; $('#s-persist').checked = false; toast('키를 삭제했습니다.'); render(); },
+  'clear-access-key': () => { state.accessKey = ''; storage.clearAccessKey(); $('#s-accesskey').value = ''; toast('접속 키를 삭제했습니다.'); render(); },
   'open-project-menu': () => $('#project-dialog').showModal(),
   'close-project-menu': () => $('#project-dialog').close(),
   'export-project': () => exportProject(),
@@ -1061,15 +1188,25 @@ $('#settings-form').addEventListener('submit', (ev) => { ev.preventDefault(); sa
 $('#exp-form').addEventListener('submit', (ev) => { ev.preventDefault(); saveExpFromForm(); $('#exp-dialog').close(); });
 window.addEventListener('beforeunload', (ev) => { if (state.ui.busy) { ev.preventDefault(); ev.returnValue = ''; } });
 
-// 디버깅·E2E용 최소 노출
-window.__jaso = { state, render, actions };
+/** 상단 배지·하단 안내문: 실행 환경이 정해질 때마다 갱신한다 (확인 중에는 배지만 '확인 중…') */
+function renderChrome() {
+  const badge = $('#runtime-badge');
+  if (badge) {
+    badge.hidden = false;
+    badge.textContent = RUNTIME.artifact ? 'claude.ai 구독' : RUNTIME.checking ? '확인 중…' : RUNTIME.server ? '운영자 구독' : 'API 키';
+    badge.classList.toggle('server', RUNTIME.server);
+  }
+  const footer = $('#site-footer');
+  if (footer && !RUNTIME.checking) footer.textContent = RUNTIME.artifact
+    ? '개인용 도구입니다. 입력한 내용은 이 브라우저에만 저장되며, Claude 호출은 보는 사람의 claude.ai 구독 사용량으로 이뤄집니다.'
+    : RUNTIME.server
+      ? '개인용 도구입니다. 입력한 내용은 이 브라우저에 저장되고, Claude 호출은 운영자의 서버를 거쳐 운영자의 claude.ai 구독으로 이뤄집니다. 서버는 내용을 저장하지 않습니다.'
+      : '개인용 도구입니다. API 키는 이 브라우저에서 Anthropic API로 직접 전송되며, 이 사이트의 서버로는 아무것도 보내지 않습니다.';
+}
 
-const badge = $('#runtime-badge');
-if (badge) { badge.hidden = false; badge.textContent = RUNTIME.artifact ? 'claude.ai 구독' : 'API 키'; }
-const footer = $('#site-footer');
-if (footer) footer.textContent = RUNTIME.artifact
-  ? '개인용 도구입니다. 입력한 내용은 이 브라우저에만 저장되며, Claude 호출은 보는 사람의 claude.ai 구독 사용량으로 이뤄집니다.'
-  : '개인용 도구입니다. API 키는 이 브라우저에서 Anthropic API로 직접 전송되며, 이 사이트의 서버로는 아무것도 보내지 않습니다.';
+// 디버깅·E2E용 최소 노출
+window.__jaso = { state, render, actions, runtime: RUNTIME };
+
+renderChrome();
 render();
 initRuntime();
-if (!RUNTIME.artifact && !hasApiKey() && !state.project.questions.length) setTimeout(() => toast('먼저 설정에서 Anthropic API 키를 입력하세요.'), 300);

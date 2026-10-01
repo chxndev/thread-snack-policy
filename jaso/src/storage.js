@@ -2,6 +2,7 @@
 const PROJECT_KEY = 'jaso.project.v1';
 const SETTINGS_KEY = 'jaso.settings.v1';
 const KEY_KEY = 'jaso.apiKey.v1';
+const ACCESS_KEY_KEY = 'jaso.accessKey.v1'; // 운영자 구독 서버의 접속 키 (이 브라우저에만 저장)
 
 // 저장소 접근이 차단된 환경(쿠키 차단, 샌드박스 iframe)에서는 전역 접근 자체가 throw 하므로 try 안에서 얻는다
 function getStore(kind) {
@@ -51,5 +52,15 @@ export const storage = {
   clearApiKey() {
     write('session', KEY_KEY, null);
     write('local', KEY_KEY, null);
+  },
+  loadAccessKey() {
+    const v = read('local', ACCESS_KEY_KEY);
+    return typeof v === 'string' ? v : '';
+  },
+  saveAccessKey(key) {
+    write('local', ACCESS_KEY_KEY, key || null);
+  },
+  clearAccessKey() {
+    write('local', ACCESS_KEY_KEY, null);
   },
 };

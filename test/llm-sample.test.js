@@ -2,6 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createAgent, upsertExperience, currentText } from '../jaso/src/agent.js';
 import { createSampleProvider, peekQuestion, SAMPLE_ERROR_TEXT } from '../jaso/src/llm-sample.js';
+import { INTERVIEW_REPLY_SCHEMA } from '../jaso/src/prompts.js';
 import { sampleProject } from './helpers/fake-client.js';
 
 /** claude.use('sample') 흉내: responder(input, opts, kind) → string(text) | object(json) */
@@ -141,4 +142,25 @@ test('peekQuestion은 스트리밍 중인 JSON에서 질문 앞부분을 뽑는�
   assert.equal(peekQuestion('{"saved":[],"question":{"question":"안녕하세요, 어떤 경'), '안녕하세요, 어떤 경');
   assert.equal(peekQuestion('{"saved":[],"question":{"question":"따옴표 \\"포함\\" 질문","why"'), '따옴표 "포함" 질문');
   assert.equal(peekQuestion('{"saved":[]'), null);
+});
+
+test('sample 오류 매핑: 서버가 보낸 한국어 문구와 resetsAt을 우선하고, 서버 모드 코드(unauthorized·nologin·busy·timeout·network)를 안다', async () => {
+  const project = sampleProject();
+  const mk = (err) => createAgent({ provider: createSampleProvider({ sample: fakeSample(() => ({ __error: err })), cfg }), settings: cfg });
+  await assert.rejects(() => mk({ code: 'usage_limit', message: '한도입니다. 오후 3:00 이후 다시 시도해 주세요.', resetsAt: 7 }).draft(project, project.questions[0], {}), (e) => e.code === 'usage_limit' && e.message === '한도입니다. 오후 3:00 이후 다시 시도해 주세요.' && e.resetsAt === 7);
+  for (const code of ['unauthorized', 'nologin', 'busy', 'timeout', 'network']) {
+    await assert.rejects(() => mk({ code, message: code }).draft(project, project.questions[0], {}), (e) => e.code === code && e.message === SAMPLE_ERROR_TEXT[code]);
+  }
+});
+
+test('sample 제공자: acceptsSchema면 json·인터뷰 호출 opts에 schema가 들어가고, 아니면 들어가지 않는다', async () => {
+  const finish = () => ({ saved: [], question: null, finish: { summary: 's', writer_notes: '' } });
+  const sample = fakeSample(finish);
+  sample.acceptsSchema = true;
+  await createAgent({ provider: createSampleProvider({ sample, cfg }), settings: cfg }).interviewStart(sampleProject(), {});
+  assert.deepEqual(sample.calls[0].opts.schema, INTERVIEW_REPLY_SCHEMA);
+  assert.equal(sample.calls[0].opts.modelTier, 'default');
+  const plain = fakeSample(finish);
+  await createAgent({ provider: createSampleProvider({ sample: plain, cfg }), settings: cfg }).interviewStart(sampleProject(), {});
+  assert.equal(plain.calls[0].opts.schema, undefined);
 });

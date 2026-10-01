@@ -1,18 +1,28 @@
-# 자소서 에이전트 정적 서버 — WSL2(systemd) 백그라운드 서비스
-# install.sh가 __USER__/__DIR__ 자리를 채워 /etc/systemd/system/jaso.service 로 설치합니다.
+# 자소서 에이전트 서버(운영자 구독 모드) — WSL2(systemd) 백그라운드 서비스
+# install.sh가 __USER__ __HOME__ __DIR__ __NODE__ __PATH__ 자리를 채워 /etc/systemd/system/jaso.service 로 설치합니다.
+# 포트·접속 키 등 설정은 /etc/jaso/jaso.env (root 전용) 에 있습니다.
 [Unit]
-Description=jaso static server (http://127.0.0.1:8080/jaso/)
-After=network.target
+Description=jaso server (운영자 claude.ai 구독으로 Claude 호출, 127.0.0.1 에만 바인딩)
+After=network-online.target
+Wants=network-online.target
 
 [Service]
 Type=simple
 User=__USER__
 WorkingDirectory=__DIR__
-# 저장소 루트를 서빙: /jaso/ 가 앱. 127.0.0.1에만 바인딩(외부 노출 없음).
-ExecStart=/usr/bin/python3 -m http.server 8080 --bind 127.0.0.1 --directory __DIR__
+# systemd가 권한을 내리기 전에 읽으므로 __USER__ 는 이 파일을 읽을 권한이 없어도 됩니다.
+EnvironmentFile=/etc/jaso/jaso.env
+# claude CLI 가 ~/.claude 의 로그인 정보를 찾을 수 있게 HOME 을 고정합니다.
+Environment="HOME=__HOME__"
+Environment="PATH=__PATH__"
+ExecStart="__NODE__" "__DIR__/jaso/server/server.mjs"
 Restart=always
 RestartSec=3
-Environment=PYTHONUNBUFFERED=1
+# SIGTERM 은 서버 프로세스에만 보내고(서버가 자식 claude 를 정리), 10초 뒤 남은 것은 모두 종료합니다.
+KillMode=mixed
+TimeoutStopSec=10
+NoNewPrivileges=true
+PrivateTmp=true
 
 [Install]
 WantedBy=multi-user.target

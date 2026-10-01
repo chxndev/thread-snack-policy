@@ -40,6 +40,7 @@ h1, h2, h3, h4 { margin: 0; line-height: 1.3; }
 p { margin: 0 0 .6rem; }
 code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .9em; background: rgba(128,128,128,.14); padding: .05em .35em; border-radius: 3px; }
 .hidden { display: none !important; }
+[hidden] { display: none !important; } /* .btn 등 display를 지정한 요소에도 hidden 속성이 먹게 한다 (설정 대화상자의 모드별 버튼) */
 .muted { color: var(--ink2); }
 .small { font-size: .85rem; }
 .tiny { font-size: .78rem; }
@@ -220,3 +221,5 @@ footer.site { text-align: center; color: var(--ink3); font-size: .78rem; padding
 #confirm-dialog .dlg-body { padding: 1rem 1.1rem; }
 #confirm-dialog p { white-space: pre-wrap; }
 .runtime-badge { font-size: .72rem; color: var(--ink3); border: 1px solid var(--rule); border-radius: 999px; padding: .1rem .5rem; }
+.runtime-badge.server { border-color: var(--accent); color: var(--accent); }
+.notice b { font-weight: 600; }

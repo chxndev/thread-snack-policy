@@ -1,0 +1,21 @@
+# jaso 서버를 외부에 공개하는 cloudflared 빠른 터널(quick tunnel) — WSL2(systemd) 백그라운드 서비스
+# install-tunnel.sh가 __CLOUDFLARED__ __PORT__ 자리를 채워 /etc/systemd/system/jaso-tunnel.service 로 설치합니다.
+# 빠른 터널의 주소(https://….trycloudflare.com)는 터널이 다시 시작될 때마다 바뀝니다.
+# 고정 주소가 필요하면 install-tunnel.sh 가 마지막에 안내하는 '이름 있는 터널' 방식을 쓰세요.
+[Unit]
+Description=cloudflared quick tunnel for jaso (http://127.0.0.1:__PORT__ -> https://*.trycloudflare.com)
+After=network-online.target jaso.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+# 터널은 로그인 정보도, 쓰기 가능한 홈 디렉터리도 필요 없으므로 임시 사용자로 실행합니다.
+DynamicUser=yes
+ExecStart="__CLOUDFLARED__" tunnel --no-autoupdate --url http://127.0.0.1:__PORT__
+Restart=always
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+
+[Install]
+WantedBy=multi-user.target
