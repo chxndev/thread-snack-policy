@@ -73,7 +73,7 @@ npm run serve        # http://localhost:8080/jaso/ (정적 서버만, API 키 �
 
 - Windows 10/11 + WSL2(Ubuntu·Debian 계열), WSL에서 systemd 사용.
 - WSL 안에 Node.js 18 이상.
-- WSL 안에 Claude Code CLI(`curl -fsSL https://claude.ai/install.sh | bash` 또는 `npm i -g @anthropic-ai/claude-code`)를 **서비스를 돌릴 사용자 계정으로** 설치하고, `claude`를 실행해 `/login`으로 claude.ai 구독(Team 등) 계정에 로그인. 토큰 방식(`claude setup-token` → `CLAUDE_CODE_OAUTH_TOKEN`)도 됩니다.
+- WSL 안에 Claude Code CLI(`curl -fsSL https://claude.ai/install.sh | bash` 또는 `npm i -g @anthropic-ai/claude-code`)를 **서비스를 돌릴 사용자 계정으로** 설치하고, `claude`를 실행해 `/login`으로 claude.ai 구독(Team 등) 계정에 로그인. 토큰 방식도 됩니다: `claude setup-token`으로 장기 토큰을 만든 뒤 `CLAUDE_CODE_OAUTH_TOKEN='sk-ant-oat01-…' bash deploy/wsl/install.sh`처럼 넘기면 `/etc/jaso/jaso.env`에 저장됩니다.
 
 **설치 3단계** (모두 WSL 셸에서, 저장소 루트에서 실행)
 
@@ -126,7 +126,8 @@ sudo sed -i "s/^JASO_ACCESS_KEY=.*/JASO_ACCESS_KEY=$NEW/" /etc/jaso/jaso.env && 
 | `JASO_LOGIN_PROBE` | `1` | 시작 시 실제 호출 1회로 로그인 검증(`0`이면 끔) |
 | `JASO_ALLOW_API_KEY` | `0` | `1`이 아니면 자식 환경에서 `ANTHROPIC_API_KEY` 등을 제거(구독만 사용) |
 | `JASO_LOG_LEVEL` | `info` | 요청마다 한 줄 로그. 프롬프트·응답 내용은 어떤 레벨에서도 남기지 않음 |
-| `CLAUDE_CODE_OAUTH_TOKEN` / `CLAUDE_CONFIG_DIR` | (없음) | `/login` 대신 `claude setup-token` 토큰으로 인증 / `~/.claude` 대신 쓸 설정 폴더 |
+| `JASO_CHILD_ENV_PASSTHROUGH` | (없음) | 자식 `claude` 프로세스에 추가로 넘길 환경 변수 이름(쉼표 구분, 예: `HTTPS_PROXY,NO_PROXY`). 기본은 HOME·PATH 등 최소만 전달하므로 사내 프록시 뒤에서는 여기에 적어야 함 |
+| `CLAUDE_CODE_OAUTH_TOKEN` / `CLAUDE_CONFIG_DIR` | (없음) | `/login` 대신 `claude setup-token` 토큰으로 인증(설치 시 `CLAUDE_CODE_OAUTH_TOKEN=… bash deploy/wsl/install.sh` 로 넘기면 저장됨) / `~/.claude` 대신 쓸 설정 폴더 |
 
 > **주의 — 반드시 읽어 주세요**
 >

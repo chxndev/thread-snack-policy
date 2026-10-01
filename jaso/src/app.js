@@ -276,7 +276,14 @@ async function runTask(label, fn, { rerender = true } = {}) {
     else if (err?.code === 'norun') toast(err.message, 'bad');
     else if (err?.code === 'aborted' || err?.name === 'APIUserAbortError') toast('중단했습니다.');
     else if (err?.name === 'AgentError' && err.code === 'unauthorized') { toast(err.message, 'bad'); openSettings({ focus: '#s-accesskey' }); }
-    else { console.error(err); toast(describeError(err, RUNTIME.sdk?.describeError), 'bad'); }
+    else {
+      console.error(err);
+      // 사용량 한도 재설정 시각은 서버 시간대(대개 UTC)가 아니라 방문자 브라우저 시간대로 보여 준다
+      const msg = err?.code === 'usage_limit' && Number(err.resetsAt) > 0
+        ? `운영자 Claude 구독의 사용량 한도에 걸렸습니다. ${fmtTime(Number(err.resetsAt) * 1000)} 이후 다시 시도해 주세요.`
+        : describeError(err, RUNTIME.sdk?.describeError);
+      toast(msg, 'bad');
+    }
     return null;
   } finally {
     state.ui.busy = null;

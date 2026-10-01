@@ -179,9 +179,9 @@ AUTH_METHOD="$(printf '%s' "$AUTH_JSON" | json_field authMethod)"
 if [ "$LOGGED_IN" != "true" ]; then
   cat >&2 <<MSG
 claude 에 로그인되어 있지 않습니다 (claude auth status: ${LOGGED_IN:-확인 실패}).
-먼저 같은 사용자(${USER_NAME})로 \`claude\` 를 실행해 /login 하거나,
-\`claude setup-token\` 으로 토큰을 만들어 ${ENV_FILE} 의 CLAUDE_CODE_OAUTH_TOKEN 에 넣으세요.
-(토큰을 넣으려면 먼저 설치를 끝내야 하므로: 지금은 /login 으로 로그인한 뒤 다시 실행하는 것이 가장 간단합니다.)
+먼저 같은 사용자(${USER_NAME})로 \`claude\` 를 실행해 /login 한 뒤 다시 실행하세요 (가장 간단).
+또는 \`claude setup-token\` 으로 장기 토큰을 만든 뒤, 그 토큰을 환경 변수로 넘겨 설치하면 ${ENV_FILE} 에 저장됩니다:
+  CLAUDE_CODE_OAUTH_TOKEN='sk-ant-oat01-…' bash deploy/wsl/install.sh
 MSG
   exit 1
 fi
@@ -220,7 +220,11 @@ else
       echo "# cloudflared 터널 뒤에서 운영하면 install-tunnel.sh 가 아래 줄을 1 로 켭니다(방문자 IP 를 CF-Connecting-IP 에서 읽음)."
       echo "# JASO_TRUST_PROXY=1"
       echo "# claude /login 대신 장기 토큰으로 인증하려면 \`claude setup-token\` 결과를 아래에 넣으세요."
-      echo "# CLAUDE_CODE_OAUTH_TOKEN="
+      if [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then
+        echo "CLAUDE_CODE_OAUTH_TOKEN=$CLAUDE_CODE_OAUTH_TOKEN"
+      else
+        echo "# CLAUDE_CODE_OAUTH_TOKEN="
+      fi
     } > "$ENV_TMP"
   )
   sudo install -m 0600 -o root -g root "$ENV_TMP" "$ENV_FILE"

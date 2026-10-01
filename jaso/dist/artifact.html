@@ -259,7 +259,7 @@ footer.site { text-align: center; color: var(--ink3); font-size: .78rem; padding
       <div class="field">
         <label for="s-tier">작성 모델 등급</label>
         <select id="s-tier" name="tier"></select>
-        <span class="hint">초안·수정에 쓰는 등급입니다. 인터뷰·첨삭·공고 분석은 표준 등급으로 실행합니다. 요금제에 따라 낮은 등급으로 대체될 수 있습니다.</span>
+        <span class="hint">초안·수정에 쓰는 등급입니다. 인터뷰·첨삭·공고 분석은 표준 등급으로 실행합니다. <span data-mode="artifact">요금제에 따라 낮은 등급으로 대체될 수 있습니다.</span><span data-mode="server" hidden>등급은 운영자 서버의 모델·노력(effort) 설정에 따라 실행됩니다.</span></span>
       </div>
     </div>
     <div data-mode="api">
