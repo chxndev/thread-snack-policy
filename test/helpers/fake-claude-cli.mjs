@@ -1,9 +1,10 @@
 #!/usr/bin/env node
 // 테스트용 가짜 `claude` CLI. 서버가 JASO_CLAUDE_BIN=<이 파일> 로 띄운다.
-// `auth status --json` 과 `-p --output-format stream-json|json` 만 흉내 내며,
+// `auth status --json`·`doctor` 와 `-p --output-format stream-json|json` 만 흉내 내며,
 // 답은 test/e2e/fake-claude.js(브라우저용 가짜 window.claude)의 두뇌를 node:vm 으로 불러와 만든다.
 // 환경 변수: FAKE_MODE(hang|usage_limit|nologin|crash|refusal|truncate), FAKE_DELAY_MS(기본 5),
 //           FAKE_RATE_STATUS(기본 allowed), FAKE_LOGGED_IN(0이면 로그아웃), FAKE_LOG(호출 기록 파일),
+//           FAKE_REMOTE_MANAGED(doctor 출력의 "Managed settings (remote)" 상태, 기본 none),
 //           FAKE_STATE(두뇌의 호출 횟수 상태 파일 — 호출마다 새 프로세스로 뜨므로 인터뷰 턴·첨삭 번갈이 등
 //           두뇌의 상태를 이어 가려면 지정한다. 동시 실행이 1일 때를 전제로 한다)
 import fs from 'node:fs';
@@ -78,6 +79,20 @@ async function main() {
   const { opts, rest } = parseArgv(process.argv.slice(2));
   if (rest.includes('auth') && rest.includes('status')) {
     writeLine({ loggedIn: process.env.FAKE_LOGGED_IN !== '0', authMethod: 'claude.ai', apiProvider: 'firstParty' });
+    return;
+  }
+  if (rest[0] === 'doctor') {
+    // 텔레메트리 가드가 읽는 "Managed settings (remote): <상태>" 줄을 포함한 doctor 비슷한 출력 (FAKE_REMOTE_MANAGED 로 상태 지정)
+    process.stdout.write([
+      'Claude Code Doctor',
+      '',
+      '  Version: 2.1.286 (fake)',
+      '  Install method: fake',
+      `  Managed settings (remote): ${process.env.FAKE_REMOTE_MANAGED || 'none'}`,
+      '  Organization policy: Loaded from api.anthropic.com',
+      '  Auto-updates: disabled',
+      '',
+    ].join('\n'));
     return;
   }
 

@@ -10,8 +10,9 @@
     "test": "node --test \"test/**/*.test.js\"",
     "serve": "python3 -m http.server 8080",
     "pree2e": "playwright install chromium",
-    "e2e": "node test/e2e/e2e.mjs && node test/e2e/e2e-artifact.mjs && node test/e2e/e2e-server.mjs",
-    "build:artifact": "node scripts/build-artifact.mjs"
+    "e2e": "node test/e2e/e2e.mjs && node test/e2e/e2e-artifact.mjs && node test/e2e/e2e-server.mjs && node test/e2e/e2e-sync.mjs",
+    "build:artifact": "node scripts/build-artifact.mjs",
+    "build:icons": "node scripts/build-icons.mjs"
   },
   "devDependencies": {
     "@anthropic-ai/sdk": "0.129.0",

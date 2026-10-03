@@ -6,6 +6,7 @@ import crypto from 'node:crypto';
 import net from 'node:net';
 import { StringDecoder } from 'node:string_decoder';
 import { fileURLToPath } from 'node:url';
+import { CONTENT_FLAGS, parseGuardMode, DEFAULT_MANAGED_FILE } from './telemetry-guard.mjs';
 
 /** Claude Code CLI에 넘기는 시스템 프롬프트 */
 export const SYSTEM_PROMPT = '당신은 자기소개서 작성 도우미입니다. 사용자 메시지의 [역할과 규칙]과 [요청]을 그대로 따르고, 요청된 결과물만 출력하세요. 도구를 쓰거나 파일을 읽지 말고, 머리말·맺음말·설명을 덧붙이지 마세요. 대화 기록이 주어지면 마지막 사용자 발화에 대한 응답만 작성하세요.';
@@ -34,6 +35,12 @@ export const ERROR_TEXT = Object.freeze({
   nologin: '운영자의 Claude 로그인이 만료되었거나 설정되지 않았습니다. 운영자에게 알려 주세요.',
   busy: '지금 다른 요청을 처리하고 있습니다. 잠시 후 다시 시도해 주세요.',
   timeout: '응답이 너무 오래 걸립니다. 운영자의 Claude 로그인 상태를 확인해야 할 수 있습니다.',
+  telemetry_blocked: '운영자 조직의 Claude 텔레메트리 설정이 프롬프트·답변 본문 수집을 켜 두어 호출을 중단했습니다. 운영자에게 알려 주세요.',
+  // 같은 telemetry_blocked 코드이지만 strict 모드에서 조직 설정을 확인하지 못해(unknown) 거절할 때의 문구 — 수집이 켜졌다고 단정하지 않는다
+  telemetry_unverified: '운영자 조직의 텔레메트리 설정을 확인할 수 없어(엄격 모드) 호출을 중단했습니다. 운영자에게 알려 주세요.',
+  sync_conflict: '다른 기기에서 먼저 저장한 내용이 있어 이번 저장을 적용하지 않았습니다.',
+  sync_full: '서버의 동기화 저장 공간이 가득 찼습니다. 운영자에게 알려 주세요.',
+  sync_missing: '서버에 이 코드의 동기화 사본이 없습니다(다른 기기에서 삭제했거나 오래되어 만료됨).',
   not_found: '요청한 경로가 없습니다.',
   method_not_allowed: '허용되지 않는 요청 방식입니다.',
   internal: '서버 내부 오류입니다. 잠시 후 다시 시도해 주세요.',
@@ -52,7 +59,8 @@ export function formatKoTime(epochSec) {
 }
 
 /** 오류 코드 + 부가 정보 → 사용자에게 보여 줄 문구 */
-export function errorMessage(code, { retryAfterSec, resetsAt } = {}) {
+export function errorMessage(code, { retryAfterSec, resetsAt, guardStatus } = {}) {
+  if (code === 'telemetry_blocked' && guardStatus === 'unknown') return ERROR_TEXT.telemetry_unverified;
   if (code === 'usage_limit') {
     const when = formatKoTime(resetsAt);
     return when ? ERROR_TEXT.usage_limit.replace('{시각}', when) : ERROR_TEXT.usage_limit_unknown;
@@ -61,12 +69,14 @@ export function errorMessage(code, { retryAfterSec, resetsAt } = {}) {
   return ERROR_TEXT[code] ?? ERROR_TEXT.upstream_error;
 }
 
-/** 서버가 응답으로 바꿀 실패 객체: { status, code, message, resetsAt?, retryAfterSec?, detail? } */
+/** 서버가 응답으로 바꿀 실패 객체: { status, code, message, resetsAt?, retryAfterSec?, detail?, flags?, guardStatus? } */
 export function makeFailure(status, code, extra = {}) {
   const out = { status, code, message: errorMessage(code, extra) };
   if (extra.resetsAt !== undefined && Number.isFinite(Number(extra.resetsAt))) out.resetsAt = Number(extra.resetsAt);
   if (extra.retryAfterSec !== undefined) out.retryAfterSec = Math.max(1, Math.ceil(Number(extra.retryAfterSec) || 1));
   if (extra.detail) out.detail = String(extra.detail).slice(0, 300);
+  if (Array.isArray(extra.flags)) out.flags = extra.flags.map(String);
+  if (extra.guardStatus) out.guardStatus = String(extra.guardStatus); // telemetry_blocked: 'blocked' | 'unknown'(strict)
   return out;
 }
 
@@ -106,6 +116,9 @@ export function parseConfig(env = {}) {
     model: str(env[`JASO_MODEL_${name}`], d.model).trim() || d.model,
     effort: effort(env[`JASO_EFFORT_${name}`], d.effort),
   });
+  // 자식 CLI 추가 통과 목록: 접속 키·API 키·본문 텔레메트리 플래그는 거절한다 (서버가 시작 시 경고를 남긴다)
+  const passthroughAll = parseNameList(env.JASO_CHILD_ENV_PASSTHROUGH);
+  const home = str(env.HOME, os.homedir());
   return {
     host: str(env.JASO_HOST, '127.0.0.1'),
     port: int(env.JASO_PORT, 8080, 0),
@@ -134,7 +147,20 @@ export function parseConfig(env = {}) {
     allowApiKey: flag(env.JASO_ALLOW_API_KEY),
     logLevel: str(env.JASO_LOG_LEVEL, 'info'),
     // 자식 CLI에 추가로 넘길 환경 변수 이름들 (예: 사내 프록시 HTTPS_PROXY, 테스트의 FAKE_*)
-    childEnvPassthrough: parseNameList(env.JASO_CHILD_ENV_PASSTHROUGH),
+    childEnvPassthrough: passthroughAll.filter((k) => !ENV_NEVER.has(k)),
+    childEnvPassthroughRefused: passthroughAll.filter((k) => ENV_NEVER.has(k)),
+    // 텔레메트리 가드 (telemetry-guard.mjs)
+    telemetryGuard: parseGuardMode(env.JASO_TELEMETRY_GUARD),
+    claudeConfigDir: path.resolve(str(env.JASO_CLAUDE_CONFIG_DIR, str(env.CLAUDE_CONFIG_DIR, path.join(home, '.claude')))),
+    telemetryRecheckMs: int(env.JASO_TELEMETRY_RECHECK_MS, 3600000, 1000),
+    managedSettingsFile: str(env.JASO_MANAGED_SETTINGS_FILE, DEFAULT_MANAGED_FILE),
+    // 기기 간 동기화 저장소 (sync.mjs)
+    dataDir: path.resolve(str(env.JASO_DATA_DIR, path.join(os.homedir(), '.local', 'share', 'jaso', 'sync'))),
+    syncEnabled: env.JASO_SYNC === undefined || env.JASO_SYNC === '' ? true : String(env.JASO_SYNC).trim() !== '0',
+    syncMaxBytes: int(env.JASO_SYNC_MAX_BYTES, 2097152, 1),
+    syncMaxItems: int(env.JASO_SYNC_MAX_ITEMS, 200, 0),
+    syncTtlDays: int(env.JASO_SYNC_TTL_DAYS, 180, 0),
+    syncRateLimit: str(env.JASO_SYNC_RATE_LIMIT, '120/600'),
   };
 }
 
@@ -216,7 +242,8 @@ export function buildArgs({ model, effort, schema, fallbackModel, systemPrompt =
 
 const ENV_PASS = ['HOME', 'PATH', 'USER', 'LOGNAME', 'LANG', 'LC_ALL', 'TMPDIR', 'CLAUDE_CONFIG_DIR', 'CLAUDE_CODE_OAUTH_TOKEN'];
 const ENV_API_KEYS = ['ANTHROPIC_API_KEY', 'ANTHROPIC_AUTH_TOKEN'];
-const ENV_NEVER = new Set([...ENV_API_KEYS, 'JASO_ACCESS_KEY']);
+// 어떤 경우에도 자식에 넘기지 않는 이름: API 키, 접속 키, 본문을 내보내는 OTEL 플래그 다섯 개
+const ENV_NEVER = new Set([...ENV_API_KEYS, 'JASO_ACCESS_KEY', ...CONTENT_FLAGS]);
 
 /** 자식 CLI 환경: 화이트리스트만 통과시키고 텔레메트리·자동 업데이트를 끈다 */
 export function childEnv(env = {}, cfg = {}) {
@@ -458,6 +485,7 @@ export const MIME = Object.freeze({
   '.mjs': 'text/javascript; charset=utf-8',
   '.css': 'text/css; charset=utf-8',
   '.json': 'application/json; charset=utf-8',
+  '.webmanifest': 'application/manifest+json',
   '.svg': 'image/svg+xml',
   '.png': 'image/png',
   '.ico': 'image/x-icon',
@@ -504,13 +532,16 @@ function normIp(ip) {
 /**
  * 클라이언트 IP. trustProxy면 CF-Connecting-IP → X-Forwarded-For 의 **마지막** 항목(바로 앞 신뢰 홉이 붙인 값) → 소켓 주소.
  * 첫 항목은 클라이언트가 마음대로 넣을 수 있어 IP 별 제한을 우회할 수 있으므로 쓰지 않는다. IP 형식이 아니면 소켓 주소로 돌아간다.
+ * Tailscale Funnel 을 거친 요청(Tailscale-Funnel-Request 헤더)은 CF-Connecting-IP 를 보지 않는다: Funnel 은 이 헤더를 지우지 않아
+ * 방문자가 아무 값이나 넣어 IP 별 제한·접속 키 실패 제한을 피할 수 있다. Funnel 이 직접 넣는 X-Forwarded-For 만 믿는다.
  */
 export function clientIp(req, trustProxy = false) {
   const h = (req && req.headers) || {};
   const first = (v) => (Array.isArray(v) ? v[0] : v);
   const valid = (v) => { const ip = normIp(v); return ip !== 'unknown' && net.isIP(ip) !== 0 ? ip : null; };
   if (trustProxy) {
-    const cf = valid(first(h['cf-connecting-ip']));
+    const viaFunnel = h['tailscale-funnel-request'] !== undefined;
+    const cf = viaFunnel ? null : valid(first(h['cf-connecting-ip']));
     if (cf) return cf;
     const xff = first(h['x-forwarded-for']);
     if (xff) {

@@ -4,7 +4,9 @@ import { createAgent, DEFAULT_SETTINGS, emptyInterview, ensureAnswer, currentTex
 import { createSdkClient } from './llm-sdk.js';
 import { createSampleProvider } from './llm-sample.js';
 import { createRemoteSample } from './llm-remote.js';
-import { storage } from './storage.js';
+import { SAMPLE_ERROR_TEXT } from './llm-sample.js';
+import { createSyncClient, deriveSync, encryptJson, decryptJson, generateSyncCode, normalizeSyncCode, SYNC_ERROR_TEXT } from './sync.js';
+import { storage, EMPTY_SYNC } from './storage.js';
 import { COMMON_QUESTIONS, COMPANY_PRESETS } from './presets.js';
 import { QUESTION_TYPES, EDIT_PRESETS, SCORE_LABELS, INTERVIEW_SKIP_ANSWER, CRITIQUE_SCHEMA, computeTotal } from './prompts.js';
 import { COUNT_MODES, judgeLength, countBy, uid, validateSchema } from './text.js';
@@ -120,6 +122,7 @@ const RUNTIME = {
   artifact: IS_ARTIFACT,
   sample: null, downloads: null, checked: false, sdk: null,
   server: false, serverInfo: null, remote: null,
+  syncClient: null, // 서버 모드의 기기 간 동기화 API 클라이언트
   checking: !IS_ARTIFACT, // 일반 웹에서는 ../api/health 확인이 끝날 때까지 true
 };
 
@@ -129,7 +132,8 @@ const state = {
   apiKey: storage.loadApiKey(),
   persistKey: storage.hasPersistedApiKey(),
   accessKey: storage.loadAccessKey(),
-  ui: { busy: null, abort: null, questionStream: '', stageLog: {}, streamingId: null },
+  sync: storage.loadSync(), // 기기 간 동기화 상태 (서버 모드에서만 쓰인다)
+  ui: { busy: null, abort: null, questionStream: '', stageLog: {}, streamingId: null, syncBusy: false, syncError: '' },
 };
 
 const $ = (sel, root = document) => root.querySelector(sel);
@@ -137,8 +141,10 @@ const esc = (s) => String(s ?? '').replace(/[&<>"']/g, (c) => ({ '&': '&amp;', '
 const fmtNum = (n) => Number(n || 0).toLocaleString('ko-KR');
 
 function save() {
-  state.project.updatedAt = Date.now();
+  // 단조 증가: 다른 기기에서 가져온 버전(시계가 앞선 기기)보다 이 기기의 변경이 항상 새롭게 보이도록
+  state.project.updatedAt = Math.max(Date.now(), (Number(state.project.updatedAt) || 0) + 1);
   storage.saveProject(state.project);
+  schedulePush();
 }
 
 function toast(message, kind = '') {
@@ -147,7 +153,27 @@ function toast(message, kind = '') {
   el.className = `toast ${kind}`;
   el.textContent = message;
   box.appendChild(el);
+  raiseToastBox(box);
   setTimeout(() => el.remove(), kind === 'bad' ? 6000 : 3200);
+}
+
+/**
+ * 토스트 상자를 맨 위로 올린다. 모달 대화상자(폰에서는 화면 아래를 덮는 시트)는 top layer 에 있어 보통 요소는 z-index 로도
+ * 그 위에 올 수 없으므로, 상자를 popover(manual)로 다시 띄워 top layer 의 가장 위에 둔다.
+ * popover 가 없는 브라우저는 열린 대화상자 중 맨 위의 것 안으로 옮긴다(없으면 body 로 되돌린다).
+ */
+function raiseToastBox(box) {
+  if (typeof box.showPopover === 'function') {
+    try {
+      if (!box.hasAttribute('popover')) box.setAttribute('popover', 'manual');
+      if (box.matches(':popover-open')) box.hidePopover(); // 이미 떠 있으면 내렸다 다시 띄워야 가장 위로 간다
+      box.showPopover();
+      return;
+    } catch { /* 아래 방법으로 */ }
+  }
+  const open = [...document.querySelectorAll('dialog[open]')];
+  const host = open[open.length - 1] ?? document.body;
+  if (box.parentElement !== host) host.appendChild(box);
 }
 
 function onUsage({ message, model }) {
@@ -197,12 +223,15 @@ async function initRuntime() {
     RUNTIME.server = true;
     RUNTIME.serverInfo = info;
     RUNTIME.remote = createRemoteSample({ getKey: () => state.accessKey });
+    RUNTIME.syncClient = createSyncClient({ getKey: () => state.accessKey });
   }
   RUNTIME.checking = false;
   RUNTIME.checked = true;
   renderChrome();
   render();
   if (!RUNTIME.server && !hasApiKey() && !state.project.questions.length) setTimeout(() => toast('먼저 설정에서 Anthropic API 키를 입력하세요.'), 300);
+  // 동기화가 켜져 있으면 다른 기기의 변경을 먼저 내려받는다 (실패는 사이드바 상태줄에 표시)
+  if (canSync()) syncPull().catch(() => {});
 }
 
 /** GET ../api/health (4초 제한). jaso 서버의 응답이면 그 JSON을, 아니면 null */
@@ -254,11 +283,21 @@ function fetchJsonQuietly(url, timeoutMs) {
   });
 }
 
-/** 작업이 끝난 뒤 서버 상태(로그인·사용량 창)를 가볍게 다시 읽어 사이드바를 갱신한다 (실패는 무시) */
+/** 본문 안내(keyNotice)에 영향을 주는 서버 상태의 요약 — 바뀌었을 때만 본문을 다시 그리기 위해 쓴다 */
+const stageNoticeKey = () => `${RUNTIME.serverInfo?.login?.ok !== false}|${telemetryRefusing()}`;
+
+/**
+ * 작업이 끝난 뒤 서버 상태(로그인·사용량 창·텔레메트리)를 가볍게 다시 읽어 사이드바를 갱신한다 (실패는 무시).
+ * 본문은 로그인·텔레메트리 안내가 바뀌었고 작업 중이 아닐 때만 다시 그린다 (입력 중인 인터뷰 답변을 지우지 않게).
+ */
 function refreshServerInfo() {
   if (!RUNTIME.server || !RUNTIME.remote) return;
   RUNTIME.remote.health().then((info) => {
-    if (info && info.service === 'jaso') { RUNTIME.serverInfo = info; renderSide(); }
+    if (!info || info.service !== 'jaso') return;
+    const before = stageNoticeKey();
+    RUNTIME.serverInfo = info;
+    if (before !== stageNoticeKey() && !state.ui.busy) render();
+    else renderSide();
   }).catch(() => {});
 }
 
@@ -276,6 +315,8 @@ async function runTask(label, fn, { rerender = true } = {}) {
     else if (err?.code === 'norun') toast(err.message, 'bad');
     else if (err?.code === 'aborted' || err?.name === 'APIUserAbortError') toast('중단했습니다.');
     else if (err?.name === 'AgentError' && err.code === 'unauthorized') { toast(err.message, 'bad'); openSettings({ focus: '#s-accesskey' }); }
+    // 운영자 조직의 텔레메트리가 본문 수집을 켰다: 서버 문구를 보여 주고, finally 의 health 재조회가 안내를 갱신한다
+    else if (err?.code === 'telemetry_blocked') toast(err.message || SAMPLE_ERROR_TEXT.telemetry_blocked, 'bad');
     else {
       console.error(err);
       // 사용량 한도 재설정 시각은 서버 시간대(대개 UTC)가 아니라 방문자 브라우저 시간대로 보여 준다
@@ -315,8 +356,20 @@ function hasApiKey() {
   return !!state.apiKey;
 }
 
-/** 아티팩트 뷰어는 confirm()을 지원하지 않으므로 페이지 안의 대화상자로 묻는다 */
-function askConfirm(message, { ok = '확인', danger = false } = {}) {
+let confirmQueue = Promise.resolve();
+
+/**
+ * 아티팩트 뷰어는 confirm()을 지원하지 않으므로 페이지 안의 대화상자로 묻는다.
+ * 대화상자는 하나뿐이라 질문을 차례로 띄운다: 백그라운드 동기화의 충돌 질문이 이미 열린 질문의 문구를 덮어쓰거나
+ * 두 질문이 같은 답을 받는 일 없이, 앞 질문이 닫힌 뒤에 뜬다.
+ */
+function askConfirm(message, opts = {}) {
+  const run = confirmQueue.then(() => showConfirm(message, opts));
+  confirmQueue = run.catch(() => {});
+  return run;
+}
+
+function showConfirm(message, { ok = '확인', danger = false } = {}) {
   return new Promise((resolve) => {
     const d = $('#confirm-dialog');
     $('#confirm-message').textContent = message;
@@ -380,10 +433,8 @@ function renderSteps() {
 function renderStage() {
   const step = state.project.step;
   const stage = $('#stage');
-  if (step === 'setup') stage.innerHTML = renderSetup();
-  else if (step === 'interview') stage.innerHTML = renderInterview();
-  else if (step === 'write') stage.innerHTML = renderWrite();
-  else stage.innerHTML = renderDone();
+  const html = step === 'setup' ? renderSetup() : step === 'interview' ? renderInterview() : step === 'write' ? renderWrite() : renderDone();
+  stage.innerHTML = html + renderActionBar(); // 동작 바는 맨 뒤에 둔다 (같은 data-action 의 본 버튼이 DOM 에서 먼저 오도록)
   if (step === 'interview') {
     const chat = $('#chat');
     if (chat) chat.scrollTop = chat.scrollHeight;
@@ -401,6 +452,7 @@ function keyNotice() {
     const parts = [];
     if (!hasApiKey()) parts.push('<div class="notice">이 페이지는 운영자의 Claude 구독으로 동작합니다. 운영자에게 받은 <b>접속 키</b>를 입력하세요. <button class="btn sm" data-action="open-settings">설정에서 키 입력</button></div>');
     if (RUNTIME.serverInfo?.login?.ok === false) parts.push('<div class="notice bad">운영자의 Claude 로그인이 끊겨 있어 지금은 작성할 수 없습니다. 운영자에게 알려 주세요.</div>');
+    if (telemetryRefusing()) parts.push(`<div class="notice bad">${telemetryRefusalNotice()}</div>`);
     return parts.join('');
   }
   if (hasApiKey()) return '';
@@ -459,11 +511,11 @@ function renderSetup() {
     <div class="card-head">
       <div><h2>자기소개서 문항</h2><div class="card-title-sub">문항 문구와 글자수 제한을 공고 그대로 입력하세요. 글자수 기준(공백 포함/제외)이 중요합니다.</div></div>
       <div class="btn-row">
-        <select class="input" id="q-template" data-action-change="q-template" style="width:auto">
+        <select class="input auto-w" id="q-template" data-action-change="q-template">
           <option value="">+ 자주 나오는 문항</option>
           ${COMMON_QUESTIONS.map((q, i) => `<option value="${i}">${esc(q.text.slice(0, 28))}… (${q.limit}자)</option>`).join('')}
         </select>
-        <select class="input" id="q-preset" data-action-change="q-preset" style="width:auto">
+        <select class="input auto-w" id="q-preset" data-action-change="q-preset">
           <option value="">기업 예시 세트</option>
           ${COMPANY_PRESETS.map((c) => `<option value="${c.id}">${esc(c.name)}</option>`).join('')}
         </select>
@@ -698,7 +750,8 @@ function renderSide() {
       <span>비용</span><b>$${(u.costUsd || 0).toFixed(3)}</b>`}
     </div>
     ${busy ? `<div class="stage-log" style="margin-top:.5rem"><span class="spinner"></span> ${esc(busyLabel())}</div>` : ''}
-  </div>`;
+  </div>
+  ${renderServerCard()}`;
   const su = $('#s-usage');
   if (su) su.innerHTML = isSubscription()
     ? `<span>호출</span><b>${fmtNum(u.calls)}</b><span>과금</span><b>${subscriptionLabel()} 사용량</b>`
@@ -718,6 +771,96 @@ function usageWindowRows() {
   return `<span>사용량 창${type ? ` <span class="tiny muted">(${type})</span>` : ''}</span><b>${status}${reset}</b>`;
 }
 
+const TELEMETRY_BLOCKED_NOTICE = '운영자 조직의 텔레메트리 설정이 본문 수집을 켜 두어 지금은 작성할 수 없습니다.';
+const TELEMETRY_UNVERIFIED_NOTICE = '운영자 조직의 텔레메트리 설정을 확인할 수 없어(엄격 모드) 지금은 작성할 수 없습니다.';
+
+/** 본문에 띄우는 거부 안내: strict 모드의 unknown 은 "수집이 켜졌다"가 아니라 "확인할 수 없다"고 알린다 */
+function telemetryRefusalNotice() {
+  return RUNTIME.serverInfo?.telemetry?.status === 'unknown' ? TELEMETRY_UNVERIFIED_NOTICE : TELEMETRY_BLOCKED_NOTICE;
+}
+
+/** 서버의 텔레메트리 가드가 지금 Claude 호출을 거부하는 상태인가 (block 모드의 blocked, strict 모드의 blocked·unknown) */
+function telemetryRefusing() {
+  const t = RUNTIME.server ? RUNTIME.serverInfo?.telemetry : null;
+  if (!t || typeof t !== 'object' || t.mode === 'off' || t.mode === 'warn') return false;
+  return t.status === 'blocked' || (t.status === 'unknown' && t.mode === 'strict');
+}
+
+/** 사이드바의 조직 텔레메트리 상태 문구. 가드가 꺼져 있거나(off/null) 정보가 없으면 '' */
+function telemetryStatusHtml() {
+  const t = RUNTIME.serverInfo?.telemetry;
+  if (!t || typeof t !== 'object' || t.mode === 'off' || !t.status) return '';
+  if (t.status === 'blocked') {
+    const text = t.mode === 'warn'
+      ? '운영자 조직의 텔레메트리 설정이 본문 수집을 켜 두고 있습니다(운영자가 경고만 하도록 설정). 입력 내용이 조직에 수집될 수 있습니다.'
+      : TELEMETRY_BLOCKED_NOTICE;
+    return `<div class="notice bad small telemetry" style="margin:.5rem 0 0">${text}</div>`;
+  }
+  const checkedAt = typeof t.checkedAt === 'number' ? t.checkedAt : Date.parse(t.checkedAt ?? '') || 0;
+  if (!checkedAt) return '<div class="tiny muted telemetry">조직 텔레메트리: 확인 중…</div>'; // 서버가 아직 첫 검사를 끝내지 않았다
+  if (t.status === 'unknown') return `<div class="tiny muted telemetry">조직 텔레메트리: 설정을 확인할 수 없음(조직이 원격 설정을 내려보내지만 캐시 없음)${t.mode === 'strict' ? ' — 엄격 모드라 지금은 작성할 수 없습니다' : ''}</div>`;
+  if (t.status === 'clear') {
+    // doctor 가 원격 설정 여부를 알려 주지 않았고(실패·시간 초과·다른 출력) 캐시도 없으면, 본 것은 로컬 설정뿐이라 "확인"이라 하지 않는다
+    if (t.remoteManaged === 'unknown' && t.cacheFile === 'absent') return `<div class="tiny muted telemetry">조직 텔레메트리: 본문 수집 설정 없음 (조직 원격 설정 여부는 확인하지 못함, ${fmtClock(checkedAt)})</div>`;
+    return `<div class="tiny muted telemetry">조직 텔레메트리: 본문 수집 꺼짐 확인 (${fmtClock(checkedAt)})</div>`;
+  }
+  return '';
+}
+
+/** 사이드바(서버 모드): 기기 간 동기화 상태줄 + 지금 동기화 버튼 + 조직 텔레메트리 상태 */
+function renderServerCard() {
+  if (!RUNTIME.server) return '';
+  const s = state.sync;
+  let line;
+  let button;
+  if (!serverSyncAvailable()) {
+    line = '동기화: 서버에서 사용 안 함';
+    button = '';
+  } else if (!s.enabled) {
+    line = '동기화: 꺼짐';
+    button = '<button class="btn sm" data-action="open-settings">켜기</button>';
+  } else {
+    const last = Math.max(s.lastPushedAt, s.lastPulledAt);
+    line = state.ui.syncError
+      ? `동기화: 오류 — ${esc(state.ui.syncError)}`
+      : `동기화: 켜짐${last ? ` · 마지막 ${fmtClock(last)}` : ''}${!hasApiKey() ? ' · 접속 키 필요' : ''}`;
+    button = `<button class="btn sm" data-action="sync-now" ${state.ui.syncBusy ? 'disabled' : ''}>${state.ui.syncBusy ? '<span class="spinner"></span> 동기화 중' : '지금 동기화'}</button>`;
+  }
+  return `
+  <div class="card server-card">
+    <div class="card-head" style="margin-bottom:.3rem"><h3 style="font-size:.95rem">기기 간 동기화</h3>${button}</div>
+    <div class="small muted sync-status" id="sync-status">${line}</div>
+    ${telemetryStatusHtml()}
+  </div>`;
+}
+
+/**
+ * 폰(≤640px)에서 화면 아래에 붙는 현재 단계의 주요 동작 (데스크톱에서는 CSS 가 숨긴다).
+ * 인터뷰 진행 중에는 답변 입력창이 그 자리를 차지하므로 비운다. 본 버튼과 같은 data-action 을 쓴다.
+ */
+function renderActionBar() {
+  const p = state.project;
+  const busy = state.ui.busy;
+  const dis = busy ? 'disabled' : '';
+  let buttons = '';
+  if (p.step === 'setup') {
+    buttons = `<button class="btn" data-action="skip-interview" ${dis}>건너뛰고 작성</button><button class="btn primary" data-action="start-interview" ${dis}>${p.interview.status === 'idle' ? '경험 인터뷰 시작' : '인터뷰로 이동'}</button>`;
+  } else if (p.step === 'interview') {
+    const iv = p.interview;
+    if (iv.status === 'done') buttons = '<button class="btn primary" data-action="go-write">작성 단계로 →</button>';
+    else if (iv.status === 'idle') buttons = busy ? '<button class="btn" data-action="stop">중단</button>' : `<button class="btn primary" data-action="start-interview">${iv.messages.length ? '이어서 진행' : '인터뷰 시작'}</button>`;
+  } else if (p.step === 'write') {
+    const pendingCount = p.questions.filter((q) => !(p.answers[q.id]?.versions?.length)).length;
+    buttons = (busy
+      ? '<button class="btn" data-action="stop">중단</button>'
+      : `<button class="btn primary" data-action="write-all" ${p.questions.length ? '' : 'disabled'}>${pendingCount ? `남은 ${pendingCount}문항 완성` : '전체 다시 생성'}</button>`)
+      + `<button class="btn" data-action="go-done" ${stepAllowed('done') ? '' : 'disabled'}>완성으로 →</button>`;
+  } else {
+    buttons = '<button class="btn primary" data-action="copy-all">전체 복사</button><button class="btn" data-action="download-txt">TXT 저장</button>';
+  }
+  return buttons ? `<div class="actionbar" role="toolbar" aria-label="주요 동작">${buttons}</div>` : '';
+}
+
 function busyLabel() {
   const b = state.ui.busy;
   if (b === 'interview') return '인터뷰어가 생각 중…';
@@ -731,7 +874,8 @@ function busyLabel() {
 
 function setBind(path, value) {
   const [a, b] = path.split('.');
-  if (a === 'profile') state.project.profile[b] = value;
+  if (a !== 'profile' || state.project.profile[b] === value) return; // 값이 그대로면 저장(=동기화 push)하지 않는다 (다시 그릴 때 사라지는 입력란의 change 등)
+  state.project.profile[b] = value;
   save();
 }
 
@@ -835,7 +979,7 @@ async function writeQuestions(questions) {
       } catch (err) {
         if (err?.code === 'aborted' || err?.name === 'APIUserAbortError') throw err;
         // 접속 키·로그인·한도·연결 문제는 다음 문항도 똑같이 실패하므로 묶음 작업을 멈춘다
-        if (['unauthorized', 'nologin', 'usage_limit', 'network'].includes(err?.code)) throw err;
+        if (['unauthorized', 'nologin', 'usage_limit', 'network', 'telemetry_blocked'].includes(err?.code)) throw err;
         console.error(err);
         toast(`${q.id}: ${describeError(err)}`, 'bad');
       } finally {
@@ -944,6 +1088,299 @@ async function importProject(file) {
   }
 }
 
+// ───────────────────────────── 기기 간 동기화 ─────────────────────────────
+// 서버 모드에서만. 프로젝트를 동기화 코드에서 파생한 키로 암호화해 서버에 올리고(push), 다른 기기의 변경을 내려받는다(pull).
+// 서버는 암호문만 저장한다. push/pull/켜기는 하나의 직렬 큐로 돌려 서로 겹치지 않게 한다.
+
+const PUSH_DEBOUNCE_MS = 1500;
+const WAKE_PULL_THROTTLE_MS = 20000;
+const fmtClock = (ms) => new Date(ms).toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit', hour12: false });
+
+let syncKey = null; // 현재 코드의 AES-GCM 키 (저장하지 않고 코드에서 파생)
+let syncKeyFor = '';
+let pushTimer = null;
+let syncQueue = Promise.resolve();
+let lastWakePullAt = 0; // visibilitychange/focus 로 인한 pull 의 쓰로틀 기준 (부팅·수동 pull 과는 별개)
+let lastSyncErrorCode = '';
+let enablingCode = ''; // 켜는 중인 코드 (설정 저장이 같은 코드로 한 번 더 켜지 않게)
+
+/** 서버가 동기화 API 를 제공하는가 (health 에 sync 가 없으면 — 이전 버전 서버 — 제공한다고 본다) */
+function serverSyncAvailable() { return RUNTIME.server && !!RUNTIME.syncClient && RUNTIME.serverInfo?.sync?.enabled !== false; }
+/** 지금 push/pull 을 해도 되는가: 켜져 있고 접속 키 조건을 만족 */
+function canSync() { return serverSyncAvailable() && state.sync.enabled && !!state.sync.code && !!state.sync.id && hasApiKey(); }
+const syncLocked = (fn) => { const run = syncQueue.then(() => fn()); syncQueue = run.catch(() => {}); return run; }; // syncQueue 는 항상 성공으로 끝난다
+const localChangedSinceBase = () => (Number(state.project.updatedAt) || 0) > state.sync.baseUpdatedAt;
+
+function saveSyncState(patch = {}) { Object.assign(state.sync, patch); storage.saveSync(state.sync); }
+
+async function ensureSyncKey(code = state.sync.code) {
+  if (syncKey && syncKeyFor === code) return syncKey;
+  const d = await deriveSync(code);
+  syncKey = d.key;
+  syncKeyFor = code;
+  if (state.sync.id !== d.id) saveSyncState({ id: d.id });
+  return syncKey;
+}
+
+/** 오류는 상태줄에 남기고, 같은 종류의 오류는 한 번만 토스트한다 (백그라운드 push 가 반복 실패해도 시끄럽지 않게) */
+function setSyncError(err) {
+  if (!err) { state.ui.syncError = ''; lastSyncErrorCode = ''; renderSide(); return; }
+  const msg = (typeof err.message === 'string' && err.message) || SYNC_ERROR_TEXT[err.code] || SAMPLE_ERROR_TEXT[err.code] || String(err);
+  state.ui.syncError = msg;
+  console.warn('sync', err);
+  if ((err.code || msg) !== lastSyncErrorCode) { lastSyncErrorCode = err.code || msg; toast(`동기화: ${msg}`, 'bad'); }
+  renderSide();
+}
+
+/** 로컬 프로젝트가 비어 있는가 (새 기기에서 코드만 넣은 상태) */
+function isProjectEmpty(p) {
+  return !p.questions.length && !p.experiences.length && !Object.keys(p.answers).length
+    && !p.profile.company.trim() && !p.profile.role.trim() && !p.profile.jobPosting.trim() && !p.profile.background.trim();
+}
+
+/** 서버 payload → 정규화된 프로젝트 (키가 다르면 sync_badkey 를 던진다) */
+async function decryptRemote(payload) {
+  const obj = await decryptJson(await ensureSyncKey(), payload);
+  return normalizeProject(obj && typeof obj === 'object' && obj.project ? obj.project : obj);
+}
+
+/** 서버 버전으로 로컬 프로젝트를 바꾼다. updatedAt 은 서버 기록을 따르고 save() 로 시각을 올리지 않는다. 작업 중이면 바꾸지 않는다 */
+function adoptRemote(project, { etag, updatedAt }) {
+  if (state.ui.busy) return false;
+  // 인터뷰 답변 칸(#iv-answer)은 상태에 저장되지 않으므로, 다시 그리기 전에 적던 내용을 챙겨 두었다가 되돌린다
+  const draft = $('#iv-answer')?.value ?? '';
+  project.updatedAt = Number(updatedAt) || Number(project.updatedAt) || Date.now();
+  state.project = project;
+  state.ui.stageLog = {};
+  state.ui.questionStream = '';
+  storage.saveProject(state.project);
+  saveSyncState({ etag, baseUpdatedAt: project.updatedAt, lastPulledAt: Date.now() });
+  render();
+  const ta = $('#iv-answer');
+  if (draft && ta && !ta.value) ta.value = draft;
+  return true;
+}
+
+const CONFLICT_QUESTION = '다른 기기에서 바뀐 내용이 있습니다. 서버 버전을 가져올까요? (취소하면 이 기기 내용으로 덮어씁니다)';
+const MISSING_QUESTION = '서버에 있던 이 코드의 동기화 사본이 없어졌습니다(다른 기기에서 삭제했거나 오래되어 만료됨). 이 기기 내용을 서버에 다시 올릴까요? (취소하면 이 기기의 동기화도 끕니다)';
+
+/**
+ * 이 기기가 전에 동기화했던(etag 를 아는) 서버 사본이 없어졌다: 다른 기기의 「서버 사본 삭제」를 몰래 되돌리지 않도록 묻는다.
+ * 다시 올리기 → If-Match 없이 올린다(내용이 비었으면 올리지 않음). 취소 → 이 기기의 동기화도 끈다.
+ */
+async function handleRemoteMissing() {
+  if (!(await askConfirm(MISSING_QUESTION, { ok: '다시 올리기' }))) {
+    disableSyncLocal();
+    toast('서버 사본이 없어 이 기기의 동기화를 껐습니다. 이 기기의 내용은 그대로 남습니다.');
+    return 'off';
+  }
+  if (!canSync()) return 'skipped';
+  saveSyncState({ etag: '', baseUpdatedAt: 0, lastPulledAt: Date.now() });
+  setSyncError(null);
+  return isProjectEmpty(state.project) ? 'missing' : doPush({ force: true });
+}
+
+/** save() 가 부른다: 1.5초 안에 더 바뀌지 않으면 올린다 */
+function schedulePush() {
+  if (!canSync()) return;
+  clearTimeout(pushTimer);
+  pushTimer = setTimeout(() => { pushTimer = null; syncPush().catch(() => {}); }, PUSH_DEBOUNCE_MS);
+}
+
+function syncPush(opts = {}) { return syncLocked(() => doPush(opts)); }
+function syncPull() { return syncLocked(() => doPull()); }
+
+/** 현재 프로젝트를 암호화해 PUT. 아는 etag 로 If-Match 를 걸고, 412 면 서버 버전과 견준다. force 면 If-Match 없이 덮어쓴다 */
+async function doPush({ force = false } = {}) {
+  if (!canSync()) return 'skipped';
+  if (state.ui.busy) return 'busy'; // Claude 작업 중에는 올리지 않는다 — 끝나면 runTask 의 save() 가 다시 예약한다
+  state.ui.syncBusy = true;
+  renderSide();
+  try {
+    const key = await ensureSyncKey();
+    const project = state.project;
+    const updatedAt = Number(project.updatedAt) || Date.now();
+    project.updatedAt = updatedAt;
+    const payload = await encryptJson(key, { v: 1, project });
+    const r = await RUNTIME.syncClient.put(state.sync.id, { payload, updatedAt, ifMatch: force ? '' : state.sync.etag });
+    if (r.status === 'ok') {
+      saveSyncState({ etag: r.etag, baseUpdatedAt: updatedAt, lastPushedAt: Date.now() });
+      setSyncError(null);
+      return 'pushed';
+    }
+    // 412 sync_missing: 아는 etag 로 올렸는데 서버 사본이 없다(다른 기기가 삭제·만료) → 다시 만들지 묻는다
+    if (r.status === 'missing') return handleRemoteMissing();
+    if (force) throw { code: 'sync_conflict', message: SYNC_ERROR_TEXT.sync_conflict };
+    // 412: 다른 기기가 먼저 올렸다
+    const remote = await decryptRemote(r.payload);
+    const remoteNewer = r.updatedAt > state.sync.baseUpdatedAt;
+    if (remoteNewer && localChangedSinceBase() && !(await askConfirm(CONFLICT_QUESTION, { ok: '서버 버전 가져오기' }))) {
+      saveSyncState({ etag: r.etag });
+      return doPush({ force: true });
+    }
+    if (remoteNewer) {
+      if (!adoptRemote(remote, r)) return 'busy';
+      toast('다른 기기의 변경을 가져왔습니다.', 'ok');
+      return 'pulled';
+    }
+    // 서버 기록이 더 오래됐는데 etag 만 다른 경우: 이 기기 내용으로 덮어쓴다
+    saveSyncState({ etag: r.etag });
+    return doPush({ force: true });
+  } catch (e) {
+    setSyncError(e);
+    throw e;
+  } finally {
+    state.ui.syncBusy = false;
+    renderSide();
+  }
+}
+
+/** GET(If-None-Match) 으로 서버 버전을 확인하고, 더 새로우면 가져온다 (이 기기도 바뀌었으면 묻는다). 서버에 없으면 이 기기 내용을 올린다 */
+async function doPull() {
+  if (!canSync()) return 'skipped';
+  if (state.ui.busy) return 'busy';
+  state.ui.syncBusy = true;
+  renderSide();
+  try {
+    await ensureSyncKey();
+    const r = await RUNTIME.syncClient.get(state.sync.id, { etag: state.sync.etag });
+    if (r.status === 'notmodified') {
+      saveSyncState({ lastPulledAt: Date.now() });
+      setSyncError(null);
+      return localChangedSinceBase() ? doPush() : 'same';
+    }
+    if (r.status === 'missing') {
+      // 기록이 없다(삭제·만료). 전에 이 코드로 주고받은 적이 있으면(etag 를 앎) 다시 올릴지 묻고,
+      // 첫 올리기가 아직 안 된 경우(etag 모름)에만 이 기기에 내용이 있으면 그냥 올린다
+      if (state.sync.etag) return handleRemoteMissing();
+      saveSyncState({ etag: '', baseUpdatedAt: 0, lastPulledAt: Date.now() });
+      setSyncError(null);
+      return isProjectEmpty(state.project) ? 'missing' : doPush({ force: true });
+    }
+    const remote = await decryptRemote(r.payload);
+    saveSyncState({ lastPulledAt: Date.now() });
+    if (r.updatedAt <= state.sync.baseUpdatedAt) {
+      // 이미 아는 버전 (etag 만 몰랐던 경우)
+      saveSyncState({ etag: r.etag });
+      setSyncError(null);
+      return localChangedSinceBase() ? doPush() : 'same';
+    }
+    if (localChangedSinceBase() && !(await askConfirm(CONFLICT_QUESTION, { ok: '서버 버전 가져오기' }))) {
+      saveSyncState({ etag: r.etag });
+      return doPush({ force: true });
+    }
+    if (!adoptRemote(remote, r)) return 'busy';
+    setSyncError(null);
+    toast('다른 기기의 변경을 가져왔습니다.', 'ok');
+    return 'pulled';
+  } catch (e) {
+    setSyncError(e);
+    throw e;
+  } finally {
+    state.ui.syncBusy = false;
+    renderSide();
+  }
+}
+
+/** 동기화 끄기(이 기기만). 서버의 사본은 그대로 둔다 */
+function disableSyncLocal() {
+  clearTimeout(pushTimer);
+  pushTimer = null;
+  syncKey = null;
+  syncKeyFor = '';
+  state.sync = { ...EMPTY_SYNC };
+  storage.clearSync();
+  state.ui.syncError = '';
+  lastSyncErrorCode = '';
+  const input = $('#s-synccode');
+  if (input) input.value = '';
+  renderSide();
+}
+
+/**
+ * 코드로 동기화 켜기. fresh(새로 만든 코드)면 바로 올리고, 아니면 서버를 먼저 확인한다:
+ * 기록이 있으면 (로컬이 비었거나 서버가 더 새로우면) 서버 버전으로 바꾸고, 아니면 묻는다. 기록이 없으면 이 기기 내용을 올린다.
+ */
+function enableSync(code, { fresh = false } = {}) {
+  if (!serverSyncAvailable()) { toast(SYNC_ERROR_TEXT.sync_disabled, 'bad'); return Promise.resolve(false); }
+  if (!hasApiKey()) { toast('접속 키를 먼저 입력하세요.', 'bad'); return Promise.resolve(false); }
+  enablingCode = code;
+  return syncLocked(async () => {
+    state.ui.syncBusy = true;
+    renderSide();
+    try {
+      const { id, key } = await deriveSync(code);
+      syncKey = key;
+      syncKeyFor = code;
+      saveSyncState({ code, id, etag: '', baseUpdatedAt: 0, lastPushedAt: 0, lastPulledAt: 0, enabled: true });
+      setSyncError(null);
+      if (fresh) {
+        await doPush({ force: true });
+        toast('새 동기화 코드를 만들어 이 기기 내용을 서버에 올렸습니다. 다른 기기의 설정에 같은 코드를 넣으세요.', 'ok');
+        return true;
+      }
+      const r = await RUNTIME.syncClient.get(id);
+      if (r.status === 'missing') {
+        // 코드마다 서버 경로(id)가 달라서, 틀린 코드는 "기록 없음"으로 나타난다
+        if (isProjectEmpty(state.project)) {
+          disableSyncLocal();
+          toast('동기화 코드가 맞지 않아 서버에서 프로젝트를 찾지 못했습니다(코드가 틀렸거나 서버 사본이 삭제·만료됨). 코드를 다시 확인하세요. 이 기기에서 새로 시작하려면 「새 코드 만들기」를 누르세요.', 'bad');
+          return false;
+        }
+        await doPush({ force: true });
+        toast('서버에 이 코드로 저장된 프로젝트가 없어 이 기기 내용을 새로 올렸습니다. 다른 기기와 이어지지 않으면 코드를 다시 확인하세요.', 'ok');
+        return true;
+      }
+      let remote;
+      try { remote = await decryptRemote(r.payload); } catch (e) {
+        disableSyncLocal();
+        toast(e?.message || SYNC_ERROR_TEXT.sync_badkey, 'bad');
+        return false;
+      }
+      const localUpdatedAt = Number(state.project.updatedAt) || 0;
+      let useRemote = isProjectEmpty(state.project) || localUpdatedAt <= r.updatedAt;
+      if (!useRemote) useRemote = await askConfirm('서버에 이 코드로 저장된 프로젝트가 있습니다. 서버 버전으로 바꿀까요? (취소하면 지금 기기 내용을 서버에 올립니다)', { ok: '서버 버전으로 바꾸기' });
+      if (useRemote) {
+        if (!adoptRemote(remote, r)) { toast('작업이 끝난 뒤 다시 저장해 주세요.', 'bad'); return false; }
+        toast('서버의 프로젝트를 가져왔습니다.', 'ok');
+        return true;
+      }
+      saveSyncState({ etag: r.etag });
+      await doPush({ force: true });
+      toast('동기화를 켰습니다. 이 기기 내용을 서버에 올렸습니다.', 'ok');
+      return true;
+    } catch (e) {
+      setSyncError(e);
+      return false;
+    } finally {
+      if (enablingCode === code) enablingCode = '';
+      state.ui.syncBusy = false;
+      renderSide();
+    }
+  });
+}
+
+/** 설정 저장 시 동기화 코드 칸 처리: 비우면 끄기, 형식 오류면 토스트, 새 코드면 켜기 */
+function applySyncCodeFromForm(raw) {
+  const trimmed = String(raw ?? '').trim();
+  if (!trimmed) {
+    if (state.sync.enabled) { disableSyncLocal(); toast('동기화를 껐습니다. 서버의 사본은 남아 있습니다.'); }
+    return;
+  }
+  const code = normalizeSyncCode(trimmed);
+  if (!code) { toast(SYNC_ERROR_TEXT.sync_badcode, 'bad'); return; }
+  if ((state.sync.enabled && code === state.sync.code) || code === enablingCode) return;
+  enableSync(code).catch(() => {});
+}
+
+/** 탭이 다시 보이거나 창이 포커스를 받으면(20초에 한 번) 다른 기기의 변경을 확인한다 */
+function pullOnWake() {
+  if (!canSync() || state.ui.busy || state.ui.syncBusy) return;
+  if (Date.now() - lastWakePullAt < WAKE_PULL_THROTTLE_MS) return;
+  lastWakePullAt = Date.now();
+  syncPull().catch(() => {});
+}
+
 // ───────────────────────────── 대화상자 ─────────────────────────────
 
 function currentMode() { return RUNTIME.artifact ? 'artifact' : RUNTIME.server ? 'server' : 'api'; }
@@ -956,6 +1393,8 @@ function openSettings({ focus = null } = {}) {
   $('#s-tier').innerHTML = TIERS.map((t) => `<option value="${t.id}" ${t.id === (state.settings.tier ?? 'complex') ? 'selected' : ''}>${esc(t.label)}</option>`).join('');
   $('#s-apikey').value = state.apiKey;
   $('#s-accesskey').value = state.accessKey;
+  $('#s-synccode').value = state.sync.code;
+  $('#s-sync-block').hidden = mode !== 'server' || !serverSyncAvailable();
   $('#s-persist').checked = state.persistKey;
   $('#s-model').innerHTML = MODELS.map((m) => `<option value="${m.id}" ${m.id === state.settings.model ? 'selected' : ''}>${esc(m.label)} — ${esc(m.note)}</option>`).join('');
   $('#s-effort').innerHTML = EFFORTS.map((e) => `<option value="${e.id}" ${e.id === state.settings.effort ? 'selected' : ''}>${esc(e.label)}</option>`).join('');
@@ -977,6 +1416,7 @@ function saveSettingsFromForm() {
   if (RUNTIME.server) {
     state.accessKey = f.accessKey.value.trim();
     storage.saveAccessKey(state.accessKey);
+    applySyncCodeFromForm(f.syncCode.value);
   }
   state.settings = {
     ...state.settings,
@@ -1024,6 +1464,46 @@ const actions = {
   'close-settings': () => $('#settings-dialog').close(),
   'clear-key': () => { state.apiKey = ''; state.persistKey = false; storage.clearApiKey(); $('#s-apikey').value = ''; $('#s-persist').checked = false; toast('키를 삭제했습니다.'); render(); },
   'clear-access-key': () => { state.accessKey = ''; storage.clearAccessKey(); $('#s-accesskey').value = ''; toast('접속 키를 삭제했습니다.'); render(); },
+  'sync-new-code': async () => {
+    if (!serverSyncAvailable()) return toast(SYNC_ERROR_TEXT.sync_disabled, 'bad');
+    // 대화상자에 방금 적은 접속 키는 아직 저장 전일 수 있으니 먼저 반영한다
+    const typedKey = $('#s-accesskey')?.value.trim();
+    if (typedKey && typedKey !== state.accessKey) { state.accessKey = typedKey; storage.saveAccessKey(typedKey); }
+    if (!hasApiKey()) return toast('접속 키를 먼저 입력하세요.', 'bad');
+    if (state.ui.busy) return toast('작업 중에는 동기화를 켤 수 없습니다. 먼저 중단하세요.', 'bad');
+    if (state.sync.enabled && !(await askConfirm('새 코드를 만들면 지금 코드는 더 이상 쓰이지 않습니다. 다른 기기에도 새 코드를 다시 넣어야 합니다. 계속할까요?', { ok: '새 코드 만들기' }))) return;
+    const code = generateSyncCode();
+    const input = $('#s-synccode');
+    if (input) input.value = code;
+    return enableSync(code, { fresh: true });
+  },
+  'sync-copy-code': () => {
+    const code = state.sync.code || normalizeSyncCode($('#s-synccode')?.value ?? '') || '';
+    if (!code) return toast('복사할 코드가 없습니다. 먼저 「새 코드 만들기」를 누르세요.', 'bad');
+    copyText(code);
+  },
+  'sync-off': async () => {
+    if (!state.sync.enabled) return toast('동기화가 이미 꺼져 있습니다.');
+    const { id } = state.sync;
+    disableSyncLocal();
+    toast('동기화를 껐습니다. 이 기기의 내용은 그대로 남습니다.');
+    if (!serverSyncAvailable() || !hasApiKey()) return;
+    if (!(await askConfirm('서버에 남아 있는 암호화된 사본도 삭제할까요? 이 코드로 동기화가 켜져 있는 다른 기기는 다음 동기화 때 사본을 다시 올릴지 묻습니다. 완전히 지우려면 그 기기에서 「취소」를 누르거나 「동기화 끄기」를 하세요.', { ok: '서버 사본 삭제', danger: true }))) return;
+    try { await RUNTIME.syncClient.remove(id); toast('서버의 사본을 삭제했습니다.', 'ok'); }
+    catch (e) { toast(`서버 사본 삭제 실패: ${e?.message ?? e}`, 'bad'); }
+  },
+  'sync-now': async () => {
+    if (!serverSyncAvailable()) return toast(SYNC_ERROR_TEXT.sync_disabled, 'bad');
+    if (!state.sync.enabled) return openSettings({ focus: '#s-synccode' });
+    if (!hasApiKey()) return openSettings({ focus: '#s-accesskey' });
+    if (state.ui.busy) return toast('작업이 끝난 뒤 동기화합니다.');
+    try {
+      const r = await syncPull();
+      if (r === 'same') toast('이미 최신 상태입니다.', 'ok');
+      else if (r === 'pushed') toast('이 기기 내용을 서버에 올렸습니다.', 'ok');
+      return r;
+    } catch { return null; } // 오류는 setSyncError 가 이미 보여 줬다
+  },
   'open-project-menu': () => $('#project-dialog').showModal(),
   'close-project-menu': () => $('#project-dialog').close(),
   'export-project': () => exportProject(),
@@ -1154,7 +1634,9 @@ document.addEventListener('change', async (ev) => {
     const q = state.project.questions.find((x) => x.id === el.dataset.id);
     if (!q) return;
     const k = el.dataset.qbind;
-    q[k] = k === 'limit' ? Math.max(0, Number(el.value) || 0) : el.value;
+    const v = k === 'limit' ? Math.max(0, Number(el.value) || 0) : el.value;
+    if (q[k] === v) return; // 그대로면 저장하지 않는다 (setBind 와 같은 이유)
+    q[k] = v;
     save();
     // 전체 재렌더는 클릭 중인 버튼을 파괴하므로 요약 문구만 갱신한다
     const summary = el.closest('.q-row')?.querySelector('.q-summary');
@@ -1194,6 +1676,8 @@ document.addEventListener('keydown', (ev) => {
 $('#settings-form').addEventListener('submit', (ev) => { ev.preventDefault(); saveSettingsFromForm(); $('#settings-dialog').close(); });
 $('#exp-form').addEventListener('submit', (ev) => { ev.preventDefault(); saveExpFromForm(); $('#exp-dialog').close(); });
 window.addEventListener('beforeunload', (ev) => { if (state.ui.busy) { ev.preventDefault(); ev.returnValue = ''; } });
+document.addEventListener('visibilitychange', () => { if (!document.hidden) pullOnWake(); });
+window.addEventListener('focus', pullOnWake);
 
 /** 상단 배지·하단 안내문: 실행 환경이 정해질 때마다 갱신한다 (확인 중에는 배지만 '확인 중…') */
 function renderChrome() {
@@ -1207,7 +1691,7 @@ function renderChrome() {
   if (footer && !RUNTIME.checking) footer.textContent = RUNTIME.artifact
     ? '개인용 도구입니다. 입력한 내용은 이 브라우저에만 저장되며, Claude 호출은 보는 사람의 claude.ai 구독 사용량으로 이뤄집니다.'
     : RUNTIME.server
-      ? '개인용 도구입니다. 입력한 내용은 이 브라우저에 저장되고, Claude 호출은 운영자의 서버를 거쳐 운영자의 claude.ai 구독으로 이뤄집니다. 서버는 내용을 저장하지 않습니다.'
+      ? '개인용 도구입니다. 입력한 내용은 이 브라우저에 저장되고, Claude 호출은 운영자의 서버를 거쳐 운영자의 claude.ai 구독으로 이뤄집니다. 서버는 내용을 저장하지 않습니다(기기 간 동기화를 켜면 암호화된 사본만 보관합니다).'
       : '개인용 도구입니다. API 키는 이 브라우저에서 Anthropic API로 직접 전송되며, 이 사이트의 서버로는 아무것도 보내지 않습니다.';
 }
 

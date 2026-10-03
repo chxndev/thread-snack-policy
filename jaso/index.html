@@ -2,11 +2,19 @@
 <html lang="ko">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="color-scheme" content="light dark">
 <meta name="robots" content="noindex">
 <title>자소서 에이전트</title>
 <meta name="description" content="지원 정보와 문항을 입력하면 AI가 경험을 인터뷰하고, 초안을 쓰고, 첨삭해 글자수에 맞춰 자기소개서를 완성하는 개인용 에이전트">
+<!-- PWA: 폰 홈 화면에 추가할 수 있게 한다. 서비스 워커는 두지 않는다 (서버가 꺼지면 앱도 쓸 수 없고, 오래된 캐시가 남지 않게) -->
+<link rel="manifest" href="./manifest.webmanifest">
+<meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#0f1116" media="(prefers-color-scheme: dark)">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="자소서">
+<link rel="apple-touch-icon" href="./icons/icon-180.png">
+<link rel="icon" type="image/svg+xml" href="./icons/icon.svg">
 <link rel="stylesheet" href="./style.css">
 <script type="importmap">
 { "imports": { "@anthropic-ai/sdk": "./vendor/anthropic-sdk.mjs" } }
@@ -33,12 +41,25 @@
   <form method="dialog" class="dlg-body" id="settings-form">
     <h2>설정</h2>
     <div class="notice info small" data-mode="artifact" hidden>이 페이지는 claude.ai 안에서 실행 중이며, 보는 사람의 claude.ai 구독 사용량으로 Claude를 호출합니다. API 키가 필요 없습니다.</div>
-    <div class="notice info small" data-mode="server" hidden>이 페이지는 운영자의 PC에서 운영자의 claude.ai 구독으로 Claude를 호출합니다. 입력한 내용은 운영자의 서버를 거쳐 Claude로 전달되며 서버에 저장되지는 않습니다.</div>
+    <div class="notice info small" data-mode="server" hidden>이 페이지는 운영자의 PC에서 운영자의 claude.ai 구독으로 Claude를 호출합니다. 입력한 내용은 운영자의 서버를 거쳐 Claude로 전달되며 서버에 저장되지는 않습니다. 기기 간 동기화를 켜면 이 브라우저에서 암호화한 사본만 서버에 보관됩니다.</div>
     <div data-mode="server" hidden>
       <div class="field">
         <label for="s-accesskey">접속 키</label>
         <input type="password" id="s-accesskey" name="accessKey" autocomplete="off" placeholder="운영자에게 받은 접속 키">
         <span class="hint">이 브라우저에만 저장됩니다.</span>
+      </div>
+      <div id="s-sync-block" hidden>
+        <div class="section-title">기기 간 동기화</div>
+        <div class="field">
+          <label for="s-synccode">동기화 코드</label>
+          <input type="text" id="s-synccode" name="syncCode" class="mono" autocomplete="off" autocapitalize="off" autocorrect="off" spellcheck="false" inputmode="text" placeholder="jaso-xxxx-xxxx-xxxx-xxxx">
+          <div class="btn-row">
+            <button type="button" class="btn sm" data-action="sync-new-code">새 코드 만들기</button>
+            <button type="button" class="btn sm" data-action="sync-copy-code">코드 복사</button>
+            <button type="button" class="btn sm ghost danger" data-action="sync-off">동기화 끄기</button>
+          </div>
+          <span class="hint">같은 코드를 다른 기기의 설정에 넣으면 이 프로젝트를 이어서 씁니다. 코드를 아는 사람은 누구나 내용을 볼 수 있으니 비밀로 다루세요. 서버에는 암호화된 상태로만 저장됩니다.</span>
+        </div>
       </div>
     </div>
     <div data-mode="artifact server" hidden>
@@ -110,7 +131,7 @@
 <dialog id="project-dialog">
   <div class="dlg-body">
     <h2>프로젝트</h2>
-    <p class="small muted">모든 내용은 이 브라우저(localStorage)에만 저장됩니다. 다른 기기로 옮기려면 JSON으로 내보내세요.</p>
+    <p class="small muted">모든 내용은 이 브라우저(localStorage)에 저장됩니다. 다른 기기로 옮기려면 JSON으로 내보내세요. 운영자 서버로 연 페이지라면 설정의 「기기 간 동기화」로 폰과 PC에서 이어 쓸 수 있습니다.</p>
     <div class="btn-row" style="flex-direction:column;align-items:stretch">
       <button class="btn" data-action="export-project">JSON으로 내보내기</button>
       <label class="btn" style="justify-content:center">JSON 가져오기 <input type="file" id="import-file" accept="application/json" class="sr-only"></label>

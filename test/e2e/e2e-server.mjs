@@ -25,6 +25,9 @@ const serverEnv = {
   PATH: process.env.PATH, HOME: process.env.HOME, LANG: process.env.LANG ?? 'C.UTF-8',
   JASO_PORT: '0', JASO_HOST: '127.0.0.1', JASO_ACCESS_KEY: KEY, JASO_CLAUDE_BIN: FAKE_CLI, JASO_LOGIN_PROBE: '0',
   JASO_WORK_DIR: path.join(TMP, 'work'),
+  // 텔레메트리 가드·동기화 저장소가 이 기계의 실제 ~/.claude, /etc/claude-code, ~/.local/share/jaso 를 쓰지 않도록 임시 경로로 고정한다
+  JASO_CLAUDE_CONFIG_DIR: path.join(TMP, 'claude-config'), JASO_MANAGED_SETTINGS_FILE: path.join(TMP, 'managed-settings.json'),
+  JASO_DATA_DIR: path.join(TMP, 'sync-data'),
   // 가짜 CLI에는 호출 기록 파일(등급→모델 매핑 검증용)과 두뇌 상태 파일(호출마다 새 프로세스이므로 인터뷰 턴·첨삭 번갈이를 이어 가기 위해)만 넘긴다
   JASO_CHILD_ENV_PASSTHROUGH: 'FAKE_LOG,FAKE_STATE', FAKE_LOG, FAKE_STATE,
 };
@@ -80,6 +83,8 @@ try {
   assert.equal(health.login.ok, true, `login: ${JSON.stringify(health.login)}`);
   assert.deepEqual(health.tiers.complex, { model: 'opus', effort: 'high' });
   assert.equal(typeof health.limits.maxPromptBytes, 'number');
+  assert.equal(health.telemetry?.status, 'clear', `telemetry: ${JSON.stringify(health.telemetry)}`);
+  assert.equal(health.sync?.enabled, true);
   const noKey = await fetch(`${base}api/sample`, { method: 'POST', headers: { 'content-type': 'application/json' }, body: '{"input":"x"}' });
   assert.equal(noKey.status, 401);
   assert.equal(noKey.headers.get('www-authenticate'), 'Bearer');

@@ -50,8 +50,10 @@ code { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: .
 
 /* ── 상단 바 ── */
 .topbar {
-  position: sticky; top: env(safe-area-inset-top, 0px); z-index: 20; background: var(--bg); border-bottom: 1px solid var(--rule);
-  display: flex; align-items: center; gap: 1rem; padding: .6rem 1rem; flex-wrap: wrap;
+  /* 홈 화면 앱(viewport-fit=cover)에서는 상태 표시줄 아래까지 배경이 차도록 위·옆 안전 영역만큼 안쪽 여백을 둔다 (데스크톱에서는 0) */
+  position: sticky; top: 0; z-index: 20; background: var(--bg); border-bottom: 1px solid var(--rule);
+  display: flex; align-items: center; gap: 1rem; flex-wrap: wrap;
+  padding: calc(.6rem + env(safe-area-inset-top, 0px)) max(1rem, env(safe-area-inset-right, 0px)) .6rem max(1rem, env(safe-area-inset-left, 0px));
 }
 .brand { font-weight: 700; font-size: 1.05rem; letter-spacing: -.01em; display: flex; align-items: center; gap: .5rem; }
 .brand .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--accent); display: inline-block; }
@@ -204,7 +206,9 @@ dialog h2 { font-size: 1.1rem; margin-bottom: .6rem; }
 .notice.info { background: var(--accent-soft); }
 .notice.ok { background: var(--ok-soft); }
 .notice.bad { background: var(--bad-soft); }
-#toast { position: fixed; left: 50%; bottom: 1.2rem; transform: translateX(-50%); z-index: 50; display: flex; flex-direction: column; gap: .4rem; align-items: center; pointer-events: none; }
+#toast { position: fixed; inset: auto auto 1.2rem 50%; transform: translateX(-50%); z-index: 50; display: flex; flex-direction: column; gap: .4rem; align-items: center; pointer-events: none; }
+/* app.js 가 토스트 상자를 popover(manual)로 띄워 모달 대화상자 위(top layer)에 둔다 — 브라우저 기본 popover 모양(가운데 배치·테두리·여백·배경)은 지운다 */
+#toast[popover] { margin: 0; padding: 0; border: 0; background: transparent; color: inherit; overflow: visible; }
 .toast { background: var(--ink); color: var(--bg); padding: .55rem .9rem; border-radius: 8px; font-size: .88rem; box-shadow: var(--shadow); max-width: 90vw; }
 .toast.bad { background: var(--bad); color: var(--on-status); }
 .toast.ok { background: var(--ok); color: var(--on-status); }
@@ -223,3 +227,63 @@ footer.site { text-align: center; color: var(--ink3); font-size: .78rem; padding
 .runtime-badge { font-size: .72rem; color: var(--ink3); border: 1px solid var(--rule); border-radius: 999px; padding: .1rem .5rem; }
 .runtime-badge.server { border-color: var(--accent); color: var(--accent); }
 .notice b { font-weight: 600; }
+
+/* ── 서버 모드: 기기 간 동기화·텔레메트리 상태 (사이드바) ── */
+.input.auto-w { width: auto; max-width: 100%; }
+.server-card .card-head { align-items: center; }
+.server-card .sync-status { overflow-wrap: anywhere; }
+.server-card .telemetry { margin-top: .35rem; }
+#s-synccode { letter-spacing: .03em; }
+#s-sync-block .btn-row { margin-top: .2rem; }
+
+/* ── 폰 하단 동작 바: 데스크톱에서는 숨기고, 640px 이하에서만 화면 아래에 붙인다 ── */
+.actionbar { display: none; }
+
+/* ── 폰(≤640px) ── */
+@media (max-width: 640px) {
+  /* iOS 는 16px 미만 입력란에 초점이 가면 화면을 확대한다 */
+  input, select, textarea, .input, .field input, .field select, .field textarea, .q-row textarea, .answer-text { font-size: 16px; }
+  /* 누르기 쉬운 크기 (최소 44px) */
+  .btn, .btn.sm, .step { min-height: 44px; }
+  .btn.sm { padding: .35rem .7rem; font-size: .85rem; }
+  /* 상단 바: 한 줄에 이름·배지·버튼, 둘째 줄에 4단계를 같은 폭으로 (번호 위·이름 아래) */
+  .brand { font-size: .98rem; gap: .35rem; white-space: nowrap; min-width: 0; }
+  .runtime-badge { white-space: nowrap; font-size: .68rem; padding: .05rem .4rem; }
+  .topbar-actions { gap: .3rem; }
+  .topbar-actions .btn.sm { padding: .35rem .6rem; }
+  .steps { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: .25rem; overflow: visible; }
+  .step { flex-direction: column; justify-content: center; gap: .15rem; padding: .3rem .2rem; border-radius: 10px; font-size: .78rem; line-height: 1.2; white-space: normal; text-align: center; }
+  .chip { min-height: 36px; display: inline-flex; align-items: center; }
+  .layout { padding: .75rem max(.75rem, env(safe-area-inset-right, 0px)) .75rem max(.75rem, env(safe-area-inset-left, 0px)); gap: .75rem; }
+  .card { padding: .9rem .9rem; margin-bottom: .75rem; }
+  .card-head > .btn-row { width: 100%; }
+  .card-head > .coverage { display: flex; flex-wrap: wrap; gap: .1rem .9rem; }
+  .input.auto-w { flex: 1 1 100%; width: 100%; }
+  .edit-box { flex-direction: column; }
+  .edit-box .btn { justify-content: center; }
+  /* 인터뷰 답변 입력창은 본문 흐름에 두되 화면 아래에 붙는다 */
+  .answer-box {
+    position: sticky; bottom: 0; z-index: 5; background: var(--panel);
+    margin: 0 -.9rem -.9rem; padding: .6rem .9rem calc(.6rem + env(safe-area-inset-bottom, 0px));
+    border-top: 1px solid var(--rule); border-radius: 0 0 var(--radius) var(--radius);
+  }
+  .answer-box .field { margin-bottom: .5rem; gap: .2rem; }
+  .answer-box label .muted { display: none; } /* Ctrl+Enter 안내는 폰에서 의미가 없다 */
+  .answer-box textarea { height: 5.4em; min-height: 3.4em; }
+  .answer-box .btn-row { gap: .4rem; }
+  .answer-box .btn-row > span:empty { display: none; }
+  .answer-box .btn-row .btn { flex: 1 1 auto; justify-content: center; }
+  .actionbar {
+    display: flex; gap: .5rem; position: sticky; bottom: 0; z-index: 15;
+    margin: 0 -.75rem; padding: .6rem max(.75rem, env(safe-area-inset-right, 0px)) calc(.6rem + env(safe-area-inset-bottom, 0px)) max(.75rem, env(safe-area-inset-left, 0px));
+    background: var(--bg); border-top: 1px solid var(--rule); box-shadow: 0 -4px 16px rgba(0,0,0,.08);
+  }
+  .actionbar .btn { flex: 1 1 0; justify-content: center; min-width: 0; text-align: center; }
+  /* 토스트가 하단 동작 바를 가리지 않게 */
+  #toast { bottom: calc(5rem + env(safe-area-inset-bottom, 0px)); width: calc(100% - 1.5rem); }
+  .toast { max-width: 100%; }
+  /* 대화상자는 화면 폭을 다 쓰는 아래쪽 시트로 */
+  dialog { width: 100%; max-width: 100%; max-height: 100%; margin: auto 0 0; border-radius: 14px 14px 0 0; border-width: 1px 0 0; }
+  dialog .dlg-body { max-height: 88vh; max-height: 88dvh; padding: 1rem max(1rem, env(safe-area-inset-right, 0px)) calc(1rem + env(safe-area-inset-bottom, 0px)) max(1rem, env(safe-area-inset-left, 0px)); }
+  dialog .btn-row.end .btn { flex: 1 1 auto; justify-content: center; }
+}

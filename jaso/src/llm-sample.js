@@ -30,6 +30,7 @@ export const SAMPLE_ERROR_TEXT = {
   usage_limit: '운영자 Claude 구독의 사용량 한도에 걸렸습니다. 잠시 후 다시 시도해 주세요.',
   timeout: '응답이 너무 오래 걸립니다. 운영자의 Claude 로그인 상태를 확인해야 할 수 있습니다.',
   network: '서버에 연결할 수 없습니다. 운영자의 PC나 터널이 꺼져 있을 수 있습니다.',
+  telemetry_blocked: '운영자 조직의 Claude 텔레메트리 설정이 프롬프트·답변 본문 수집을 켜 두어 호출을 중단했습니다. 운영자에게 알려 주세요.',
 };
 
 function toAgentError(e) {

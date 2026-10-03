@@ -6,6 +6,7 @@
 # 먼저 install.sh 로 jaso 서비스를 설치해야 한다. cloudflared 가 없으면 설치하고(apt 저장소 → .deb 내려받기 순),
 # /etc/systemd/system/jaso-tunnel.service 를 등록하며, 환경 파일에 JASO_TRUST_PROXY=1 을 켠다.
 # 다시 실행해도 안전하다(이미 있는 것은 건너뛰고, 터널만 다시 시작해 새 주소를 보여 준다).
+# 주소가 바뀌지 않는 무료 대안: Tailscale Funnel — bash deploy/wsl/install-funnel.sh (도메인 불필요, README 참고).
 set -euo pipefail
 
 DIR="$(cd "$(dirname "$0")/../.." && pwd)"
@@ -17,7 +18,7 @@ URL_ONLY=0
 URL_WAIT_SEC="${URL_WAIT_SEC:-40}"
 
 usage() {
-  sed -n '2,8p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,9p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 while [ $# -gt 0 ]; do
@@ -64,6 +65,7 @@ print_url_block() {
   echo "접속 키:   ${key:-(설정 파일에 없음 — bash deploy/wsl/install.sh --print-key)}"
   echo "방문자는 위 주소를 열고 '설정'에 접속 키를 넣으면 됩니다. 주소와 키는 믿을 수 있는 소수에게만 전달하세요."
   echo "주의: 빠른 터널 주소는 터널(또는 PC/WSL)이 다시 시작될 때마다 바뀝니다. 다시 보려면: bash deploy/wsl/install-tunnel.sh --url"
+  echo "      주소가 바뀌면 방문자에게 새 주소를 다시 알려야 하고, 폰 홈 화면에 추가한 아이콘도 옛 주소를 가리킵니다."
 }
 
 if [ "$(id -u)" -eq 0 ] && [ -n "${SUDO_USER:-}" ]; then
@@ -222,7 +224,13 @@ print_url_block "$URL"
 
 cat <<RECIPE
 
-고정 주소가 필요하면(이름 있는 터널, Cloudflare 에 등록된 도메인 필요) — jaso.example.com 은 본인 호스트명으로:
+고정 주소가 필요하면 둘 중 하나를 고르세요.
+
+(권장) Tailscale Funnel — 무료, 도메인 불필요, 주소 https://<기기>.<tailnet>.ts.net/ 가 고정됩니다:
+  bash deploy/wsl/install-funnel.sh
+  Funnel 로 옮긴 뒤 빠른 터널이 필요 없으면: sudo systemctl disable --now jaso-tunnel
+
+이름 있는 Cloudflare 터널 — Cloudflare 에 등록된 본인 도메인 필요(도메인 비용 별도). jaso.example.com 은 본인 호스트명으로:
   cloudflared tunnel login                      # 브라우저에서 Cloudflare 계정 인증
   cloudflared tunnel create jaso                # 터널 생성 — 출력되는 터널 ID 와 자격 증명 JSON 경로를 적어 둔다
   cloudflared tunnel route dns jaso jaso.example.com

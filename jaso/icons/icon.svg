@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+  <title>자소서 에이전트</title>
+  <!-- 배경: 강조색 둥근 사각형 (scripts/build-icons.mjs 가 마스커블·애플 아이콘용으로 모서리를 없앤다) -->
+  <rect id="bg" x="0" y="0" width="512" height="512" rx="112" fill="#c2410c"/>
+  <!-- '자' 글자: 글꼴에 기대지 않도록 선으로 그린다. ㅏ 의 짧은 획은 브랜드 점(옛 아래아 ㆍ 모양)으로 대신한다 -->
+  <g id="mark" fill="none" stroke="#ffffff" stroke-width="44" stroke-linecap="round" stroke-linejoin="round">
+    <path d="M110 152 H272"/>
+    <path d="M196 152 C192 238 160 310 104 368"/>
+    <path d="M190 246 C214 292 244 330 286 362"/>
+    <path d="M360 112 V404"/>
+    <circle cx="430" cy="252" r="30" fill="#ffffff" stroke="none"/>
+  </g>
+</svg>

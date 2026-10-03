@@ -1,0 +1,17 @@
+{
+  "name": "자소서 에이전트",
+  "short_name": "자소서",
+  "description": "경험 인터뷰부터 초안·첨삭·글자수 조정까지, 자기소개서를 완성하는 개인용 에이전트",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "lang": "ko",
+  "dir": "ltr",
+  "background_color": "#ffffff",
+  "theme_color": "#c2410c",
+  "icons": [
+    { "src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png", "purpose": "any" },
+    { "src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "any" },
+    { "src": "icons/icon-512-maskable.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable" }
+  ]
+}

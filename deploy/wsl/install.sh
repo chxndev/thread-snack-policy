@@ -2,10 +2,12 @@
 # WSL2 안에서 실행: 자소서 에이전트 서버(운영자 구독 모드)를 systemd 서비스로 등록한다.
 #   bash deploy/wsl/install.sh                # 현재 사용자, 현재 저장소 경로, 포트 8080
 #   bash deploy/wsl/install.sh --port 8090    # 포트 변경 (처음 설치할 때만 반영된다)
-#   bash deploy/wsl/install.sh --tunnel       # 설치 뒤 cloudflared 터널(install-tunnel.sh)까지 설정
+#   bash deploy/wsl/install.sh --funnel       # 설치 뒤 Tailscale Funnel(install-funnel.sh, 무료 고정 주소)까지 설정 — 권장
+#   bash deploy/wsl/install.sh --tunnel       # 설치 뒤 cloudflared 빠른 터널(install-tunnel.sh, 계정 없음·주소 바뀜)까지 설정
 #   bash deploy/wsl/install.sh --print-key    # 저장된 접속 키만 출력
 # 서버는 127.0.0.1 에만 바인딩되고, 방문자는 접속 키(JASO_ACCESS_KEY)로 인증한다.
-# 설정은 /etc/jaso/jaso.env (root 전용 0600) 에, 유닛은 /etc/systemd/system/jaso.service 에 쓴다.
+# 설정은 /etc/jaso/jaso.env (root 전용 0600) 에, 유닛은 /etc/systemd/system/jaso.service 에,
+# 기기 간 동기화의 암호문은 /var/lib/jaso/sync (서비스 사용자 전용 0700) 에 쓴다.
 # 다시 실행해도 안전하다: 기존 설정 파일은 덮어쓰지 않고 유닛만 다시 렌더링한 뒤 서비스를 재시작한다.
 set -euo pipefail
 
@@ -13,13 +15,16 @@ DIR="$(cd "$(dirname "$0")/../.." && pwd)"
 ENV_DIR=/etc/jaso
 ENV_FILE=/etc/jaso/jaso.env
 UNIT_FILE=/etc/systemd/system/jaso.service
+# 기기 간 동기화 저장 폴더(처음 설치할 때 환경 파일의 JASO_DATA_DIR 로 기록)
+SYNC_DIR=/var/lib/jaso/sync
 PORT="${PORT:-8080}"
 WITH_TUNNEL=0
+WITH_FUNNEL=0
 PRINT_KEY=0
-HEALTH_WAIT_SEC="${HEALTH_WAIT_SEC:-120}"
+HEALTH_WAIT_SEC="${HEALTH_WAIT_SEC:-150}" # auth status 15초 + 로그인 점검 90초 + claude doctor 20초 + 여유
 
 usage() {
-  sed -n '2,8p' "$0" | sed 's/^# \{0,1\}//'
+  sed -n '2,11p' "$0" | sed 's/^# \{0,1\}//'
 }
 
 while [ $# -gt 0 ]; do
@@ -29,11 +34,17 @@ while [ $# -gt 0 ]; do
       PORT="$2"; shift 2 ;;
     --port=*) PORT="${1#--port=}"; shift ;;
     --tunnel) WITH_TUNNEL=1; shift ;;
+    --funnel) WITH_FUNNEL=1; shift ;;
     --print-key) PRINT_KEY=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) echo "알 수 없는 옵션: $1" >&2; usage >&2; exit 1 ;;
   esac
 done
+
+if [ "$WITH_TUNNEL" = 1 ] && [ "$WITH_FUNNEL" = 1 ]; then
+  echo "--funnel 과 --tunnel 중 하나만 고르세요. 다른 하나는 나중에 install-funnel.sh / install-tunnel.sh 로 따로 켤 수 있습니다." >&2
+  exit 1
+fi
 
 case "$PORT" in
   ''|*[!0-9]*) echo "포트는 숫자여야 합니다: $PORT" >&2; exit 1 ;;
@@ -107,6 +118,7 @@ if [ "$(id -u)" -eq 0 ] && [ -n "${SUDO_USER:-}" ]; then
   exit 1
 fi
 USER_NAME="$(id -un)"
+USER_GROUP="$(id -gn)"
 HOME_DIR="$(getent passwd "$USER_NAME" | cut -d: -f6 || true)"
 HOME_DIR="${HOME_DIR:-$HOME}"
 if [ "$(id -u)" -eq 0 ]; then
@@ -217,7 +229,10 @@ else
       if [ -n "${CLAUDE_CONFIG_DIR:-}" ]; then
         echo "CLAUDE_CONFIG_DIR=$CLAUDE_CONFIG_DIR"
       fi
-      echo "# cloudflared 터널 뒤에서 운영하면 install-tunnel.sh 가 아래 줄을 1 로 켭니다(방문자 IP 를 CF-Connecting-IP 에서 읽음)."
+      echo "# 기기 간 동기화: 브라우저가 암호화한 프로젝트 사본을 보관하는 폴더(서버는 내용을 풀 수 없음). JASO_SYNC=0 이면 끔."
+      echo "JASO_DATA_DIR=$SYNC_DIR"
+      echo "# Tailscale Funnel·cloudflared 터널 뒤에서 운영하면 install-funnel.sh / install-tunnel.sh 가 아래 줄을 1 로 켭니다"
+      echo "# (방문자 IP 를 CF-Connecting-IP 또는 X-Forwarded-For 에서 읽음)."
       echo "# JASO_TRUST_PROXY=1"
       echo "# claude /login 대신 장기 토큰으로 인증하려면 \`claude setup-token\` 결과를 아래에 넣으세요."
       if [ -n "${CLAUDE_CODE_OAUTH_TOKEN:-}" ]; then
@@ -229,6 +244,22 @@ else
   )
   sudo install -m 0600 -o root -g root "$ENV_TMP" "$ENV_FILE"
   echo "설정 파일 생성: $ENV_FILE (접속 키 포함, root 전용)"
+fi
+
+# ── 5-1. 동기화 저장 폴더 ─────────────────────────────────────────────────
+# 서비스 사용자만 읽고 쓰는 0700 폴더. 서버는 암호문만 받으므로 여기에 평문은 남지 않는다.
+DATA_DIR="$(env_get JASO_DATA_DIR)"
+if [ -z "$DATA_DIR" ]; then
+  echo "  동기화 저장 위치: 서버 기본값(${HOME_DIR}/.local/share/jaso/sync). 바꾸려면 $ENV_FILE 에 JASO_DATA_DIR=… 를 넣으세요."
+elif [ "$DATA_DIR" = "$SYNC_DIR" ]; then
+  sudo install -d -m 0755 -o root -g root "$(dirname "$SYNC_DIR")"
+  sudo install -d -m 0700 -o "$USER_NAME" -g "$USER_GROUP" "$SYNC_DIR"
+  echo "동기화 저장 폴더: $SYNC_DIR (${USER_NAME} 전용 0700)"
+elif ! sudo test -d "$DATA_DIR"; then
+  sudo install -d -m 0700 -o "$USER_NAME" -g "$USER_GROUP" "$DATA_DIR"
+  echo "동기화 저장 폴더 생성: $DATA_DIR (${USER_NAME} 전용 0700)"
+else
+  echo "동기화 저장 폴더: $DATA_DIR (기존 폴더 유지)"
 fi
 
 # ── 6. 유닛 렌더링 ─────────────────────────────────────────────────────────
@@ -260,7 +291,7 @@ echo "서비스 등록: $UNIT_FILE (사용자 ${USER_NAME}, 포트 ${PORT})"
 # ── 7. 기동 확인 ───────────────────────────────────────────────────────────
 # 서버는 시작할 때 claude 로그인 점검(실제 호출 1회)을 마친 뒤 포트를 열므로 수십 초가 걸릴 수 있다.
 HEALTH_URL="http://127.0.0.1:${PORT}/api/health"
-echo "기동 대기 중 (최대 ${HEALTH_WAIT_SEC}초, 시작 시 Claude 로그인 점검 때문에 1~2분 걸릴 수 있습니다)…"
+echo "기동 대기 중 (최대 ${HEALTH_WAIT_SEC}초, 시작 시 Claude 로그인·조직 설정 점검 때문에 1~2분 걸릴 수 있습니다)…"
 HEALTH=""
 i=0
 while [ "$i" -lt "$HEALTH_WAIT_SEC" ]; do
@@ -285,6 +316,12 @@ LOGIN_OK="$(printf '%s' "$HEALTH" | json_field login.ok)"
 LOGIN_DETAIL="$(printf '%s' "$HEALTH" | json_field login.detail)"
 AUTH_MODE="$(printf '%s' "$HEALTH" | json_field auth)"
 USAGE_STATUS="$(printf '%s' "$HEALTH" | json_field usageWindow.status)"
+TELE_STATUS="$(printf '%s' "$HEALTH" | json_field telemetry.status)"
+TELE_MODE="$(printf '%s' "$HEALTH" | json_field telemetry.mode)"
+TELE_FLAGS="$(printf '%s' "$HEALTH" | json_field telemetry.flags)"
+TELE_REMOTE="$(printf '%s' "$HEALTH" | json_field telemetry.remoteManaged)"
+TELE_CACHE="$(printf '%s' "$HEALTH" | json_field telemetry.cacheFile)"
+SYNC_ENABLED="$(printf '%s' "$HEALTH" | json_field sync.enabled)"
 case "$LOGIN_OK" in
   true) LOGIN_TEXT="정상" ;;
   false) LOGIN_TEXT="실패 — ${LOGIN_DETAIL:-원인 미상}. 서비스 사용자로 claude /login 뒤 sudo systemctl restart jaso" ;;
@@ -295,6 +332,35 @@ echo "서버 기동 확인: $HEALTH_URL"
 echo "  Claude 로그인: $LOGIN_TEXT"
 echo "  인증: $([ "$AUTH_MODE" = key ] && echo '접속 키 필요' || echo '열림(키 없음, JASO_ALLOW_ANON)')"
 if [ -n "$USAGE_STATUS" ]; then echo "  구독 사용량 창: $USAGE_STATUS"; fi
+# 텔레메트리 가드: 조직 관리 설정이 프롬프트·답변 본문 수집(OTEL_LOG_*)을 켰는지 (README 의 '텔레메트리 가드')
+case "$TELE_STATUS" in
+  clear)
+    if [ "$TELE_REMOTE" = unknown ] && [ "$TELE_CACHE" = absent ]; then
+      # claude doctor 가 원격 설정 여부를 알려 주지 않았고 캐시도 없다 — 본 것은 로컬 설정뿐이라 '확인'이라 하지 않는다
+      echo "  조직 텔레메트리: 본문 수집 설정 없음 (조직 원격 설정 여부는 확인하지 못함, 가드 ${TELE_MODE})"
+      echo "    서비스 사용자로 claude doctor 를 실행해 'Managed settings (remote)' 줄을 확인하세요(loaded 면 ~/.claude/remote-settings.json 의 env 도)."
+    else
+      echo "  조직 텔레메트리: 본문 수집 꺼짐 확인 (가드 ${TELE_MODE})"
+    fi ;;
+  blocked)
+    if [ "$TELE_MODE" = warn ]; then
+      echo "  조직 텔레메트리: 경고 — 본문 수집이 켜져 있음 (${TELE_FLAGS}). warn 모드라 호출을 막지 않으므로 방문자 내용이 조직 수집기로 갈 수 있습니다!"
+    else
+      echo "  조직 텔레메트리: 차단 — 조직 설정이 본문 수집을 켜 둠 (${TELE_FLAGS}). 가드(${TELE_MODE})가 Claude 호출을 거부합니다(telemetry_blocked)."
+      echo "    조직 Owner 에게 claude.ai 관리자 설정 > Claude Code 의 OTEL_LOG_* 항목을 꺼 달라고 요청하세요."
+    fi ;;
+  unknown)
+    if [ "$TELE_MODE" = strict ]; then
+      echo "  조직 텔레메트리: 확인 불가 — 조직이 원격 설정을 내려보내지만 캐시(remote-settings.json)가 없음. strict 모드라 호출을 거부합니다."
+    else
+      echo "  조직 텔레메트리: 확인 불가 — 조직이 원격 설정을 내려보내지만 캐시(remote-settings.json)가 없음. 호출은 허용됩니다(${TELE_MODE:-block})."
+    fi ;;
+  *) echo "  조직 텔레메트리: 검사 안 함 (JASO_TELEMETRY_GUARD=off)" ;;
+esac
+case "$SYNC_ENABLED" in
+  true) echo "  기기 간 동기화: 켜짐 (암호문만 보관)" ;;
+  false) echo "  기기 간 동기화: 꺼짐 (JASO_SYNC=0)" ;;
+esac
 ACCESS_KEY="$(env_get JASO_ACCESS_KEY)"
 echo
 echo "접속 키 (방문자에게 전달, 다시 보려면 bash deploy/wsl/install.sh --print-key):"
@@ -304,10 +370,18 @@ echo "로컬 확인: http://localhost:${PORT}/jaso/   (Windows 브라우저에�
 echo "로그: journalctl -u jaso -f   재시작: sudo systemctl restart jaso   중지: sudo systemctl disable --now jaso"
 echo
 echo "다음 단계:"
-echo "  1) 외부 공개: bash deploy/wsl/install-tunnel.sh   (cloudflared 터널, 또는 처음부터 --tunnel 옵션)"
+echo "  1) 외부 공개 (아래 중 하나)"
+echo "     - 무료 고정 주소(권장): bash deploy/wsl/install-funnel.sh   (Tailscale Funnel, 또는 처음부터 --funnel 옵션)"
+echo "     - 계정 없이 바로(주소가 바뀜): bash deploy/wsl/install-tunnel.sh   (cloudflared 빠른 터널, 또는 --tunnel 옵션)"
 printf '%s\n' '  2) WSL 유지: Windows PowerShell 에서 powershell -ExecutionPolicy Bypass -File deploy\wsl\register-keepalive.ps1'
-echo "  3) 방문자에게 주소와 접속 키를 전달. 키 회전은 README 의 '운영' 항목 참고."
+echo "  3) 방문자에게 주소와 접속 키를 전달. 폰에서는 '홈 화면에 추가'로 설치하고, 폰↔PC 이어 쓰기는 설정의 '기기 간 동기화'를 씁니다."
+echo "     키 회전은 README 의 '운영' 항목 참고."
 
+if [ "$WITH_FUNNEL" = 1 ]; then
+  echo
+  rm -rf "$TMP_DIR"   # exec 하면 EXIT 트랩이 돌지 않으므로 먼저 치운다
+  exec bash "$DIR/deploy/wsl/install-funnel.sh" --port "$PORT"
+fi
 if [ "$WITH_TUNNEL" = 1 ]; then
   echo
   rm -rf "$TMP_DIR"   # exec 하면 EXIT 트랩이 돌지 않으므로 먼저 치운다
